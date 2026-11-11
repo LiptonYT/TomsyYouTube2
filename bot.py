@@ -1084,27 +1084,56 @@ async def finish_ticket(interaction, outcome):
         f"История отправлена в личные сообщения."
     )
 
+    # Важно: сначала отвечаем на interaction, пока канал ещё существует.
+    # Если отправить followup после channel.delete(), Discord может вернуть 10008 Unknown Message.
+    success_text = (
+        f"✅ **Обращение №{row['id']} закрыто.**\\n"
+        f"Результат: **{outcome}**.\\n"
+        "История переписки отправлена автору в личные сообщения. Удаляю канал..."
+    )
+    try:
+        await interaction.edit_original_response(content=success_text)
+    except discord.HTTPException:
+        log.exception("Не удалось обновить ответ о закрытии тикета №%s до удаления канала", row["id"])
+        try:
+            await interaction.followup.send(success_text, ephemeral=True)
+        except discord.HTTPException:
+            log.exception("Не удалось отправить подтверждение закрытия тикета №%s", row["id"])
+
     try:
         await channel.delete(reason=f"Обращение №{row['id']} закрыто: {outcome}")
-        await interaction.followup.send(
-            f"✅ **Обращение №{row['id']} закрыто.**\n"
-            f"Результат: **{outcome}**.\n"
-            "История переписки отправлена автору в личные сообщения. Канал удалён.",
-            ephemeral=True
-        )
     except discord.Forbidden:
         try:
             if opener is not None:
                 await channel.set_permissions(opener, send_messages=False)
             await channel.edit(name=f"closed-{channel.name}"[:95])
         except discord.HTTPException:
-            pass
-        await interaction.followup.send(
-            "✅ История отправлена в личные сообщения, но бот не смог удалить канал. "
-            "Выдай ему право **Manage Channels**.",
-            ephemeral=True
-        )
+            log.exception("Не удалось ограничить доступ к закрытому тикету №%s", row["id"])
+        try:
+            await interaction.edit_original_response(
+                content=(
+                    f"✅ История обращения №{row['id']} отправлена в личные сообщения, "
+                    "но бот не смог удалить канал. Выдай ему право **Manage Channels**."
+                )
+            )
+        except discord.HTTPException:
+            log.exception("Не удалось обновить сообщение о невозможности удалить тикет №%s", row["id"])
         await log_to(guild, f"⚠️ Не удалось удалить канал закрытого обращения №{row['id']}.")
+    except discord.NotFound:
+        # Канал уже удалён кем-то ещё — считаем удаление завершённым.
+        await log_to(guild, f"ℹ️ Канал обращения №{row['id']} уже был удалён.")
+    except discord.HTTPException:
+        log.exception("Discord не смог удалить канал обращения №%s", row["id"])
+        try:
+            await interaction.edit_original_response(
+                content=(
+                    f"⚠️ История обращения №{row['id']} отправлена в личные сообщения, "
+                    "но Discord не позволил удалить канал. Проверь права бота и попробуй удалить канал вручную."
+                )
+            )
+        except discord.HTTPException:
+            log.exception("Не удалось обновить сообщение об ошибке удаления тикета №%s", row["id"])
+        await log_to(guild, f"⚠️ Ошибка Discord при удалении канала обращения №{row['id']}.")
 
 
 class TicketClose(discord.ui.View):

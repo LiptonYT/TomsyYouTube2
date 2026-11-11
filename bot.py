@@ -1,6 +1,7 @@
 import os, re, json, time, random, sqlite3, logging, asyncio, xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 import aiohttp
 import discord
 from discord import app_commands
@@ -186,8 +187,8 @@ class WelcomeSetupModal(discord.ui.Modal, title="Настройка привет
 class WelcomeLinks(discord.ui.View):
     def __init__(self,gid,rules,roles):
         super().__init__(timeout=None)
-        if rules: self.add_item(discord.ui.Button(label="📜 Правила",style=discord.ButtonStyle.link,url=f"https://discord.com/channels/{gid}/{rules}"))
-        if roles: self.add_item(discord.ui.Button(label="🎭 Выбрать роли",style=discord.ButtonStyle.link,url=f"https://discord.com/channels/{gid}/{roles}"))
+        if rules: self.add_item(discord.ui.Button(label="📜 Читать правила",style=discord.ButtonStyle.link,url=f"https://discord.com/channels/{gid}/{rules}"))
+        if roles: self.add_item(discord.ui.Button(label="🎭 Получить роли",style=discord.ButtonStyle.link,url=f"https://discord.com/channels/{gid}/{roles}"))
 class WelcomeView(discord.ui.View):
     def __init__(self): super().__init__(timeout=180)
     @discord.ui.button(label="Настроить",emoji="⚙️",style=discord.ButtonStyle.primary)
@@ -201,15 +202,86 @@ class WelcomeView(discord.ui.View):
         ch=i.guild.get_channel(num(setting(i.guild.id,"welcome_channel_id")))
         if not isinstance(ch,discord.TextChannel): return await say(i,"Сначала настрой канал приветствия.")
         await send_welcome(ch,i.user,True); await say(i,f"🧪 Тест отправлен в {ch.mention}.")
-async def send_welcome(ch,member,test=False):
-    g=ch.guild; template=setting(g.id,"welcome_text","Привет, {user}! Добро пожаловать на **{server}** ❤️")
-    text=template.replace("{user}",member.mention).replace("{server}",g.name).replace("{count}",str(g.member_count or 0))
-    e=embed("🎉 ДОБРО ПОЖАЛОВАТЬ!",text,discord.Color.from_rgb(145,70,255))
+async def send_welcome(ch, member, test=False):
+    g = ch.guild
+    template = setting(
+        g.id,
+        "welcome_text",
+        "Привет, {user}! Добро пожаловать на **{server}** ❤️"
+    )
+    welcome_text = (
+        template
+        .replace("{user}", member.mention)
+        .replace("{server}", g.name)
+        .replace("{count}", str(g.member_count or 0))
+    )
+
+    # Branded, cleaner welcome card.
+    e = discord.Embed(
+        title="🎉 ДОБРО ПОЖАЛОВАТЬ В TOMSY YOUTUBE!",
+        description=(
+            f"{welcome_text}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "**Рады, что ты теперь с нами!** 💜"
+        ),
+        color=discord.Color.from_rgb(139, 92, 246),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    e.set_author(
+        name=f"{g.name}  •  СООБЩЕСТВО",
+        icon_url=g.icon.url if g.icon else (bot.user.display_avatar.url if bot.user else discord.Embed.Empty)
+    )
     e.set_thumbnail(url=member.display_avatar.url)
-    e.add_field(name="👥 Участник",value=member.mention,inline=True)
-    e.add_field(name="📊 Всего участников",value=str(g.member_count or "—"),inline=True)
-    await ch.send(content=f"✨ Рады видеть тебя, {member.mention}!" if not test else "🧪 Тестовое приветствие",
-                  embed=e,view=WelcomeLinks(g.id,num(setting(g.id,"welcome_rules_id")),num(setting(g.id,"welcome_roles_id"))))
+
+    e.add_field(
+        name="👤  ТВОЙ ПРОФИЛЬ",
+        value=f"{member.mention}\nДобро пожаловать в команду зрителей!",
+        inline=True
+    )
+    e.add_field(
+        name="👥  НАС УЖЕ",
+        value=f"**{g.member_count or '—'}** участников",
+        inline=True
+    )
+    e.add_field(
+        name="🎬  НАШИ ПЛАТФОРМЫ",
+        value="🔴 **YouTube**\n🟣 **Twitch**",
+        inline=True
+    )
+
+    rules_id = num(setting(g.id, "welcome_rules_id"))
+    roles_id = num(setting(g.id, "welcome_roles_id"))
+    next_steps = []
+    if rules_id:
+        next_steps.append("📜 Ознакомься с правилами сервера")
+    if roles_id:
+        next_steps.append("🎭 Выбери свои роли")
+    next_steps.append("💬 Загляни в чаты и присоединяйся к общению")
+    e.add_field(
+        name="🚀  С ЧЕГО НАЧАТЬ",
+        value="\n".join(f"・{step}" for step in next_steps),
+        inline=False
+    )
+
+    if g.banner:
+        e.set_image(url=g.banner.url)
+
+    e.set_footer(
+        text=f"TOMSY YOUTUBE  •  Участник №{g.member_count or '—'}",
+        icon_url=bot.user.display_avatar.url if bot.user else discord.Embed.Empty
+    )
+
+    content = (
+        f"🧪 **ТЕСТОВОЕ ПРИВЕТСТВИЕ** — так будет выглядеть сообщение."
+        if test else f"🎊 {member.mention}, добро пожаловать в наше сообщество!"
+    )
+
+    await ch.send(
+        content=content,
+        embed=e,
+        view=WelcomeLinks(g.id, rules_id, roles_id)
+    )
 
 # ---------- Rules ----------
 
@@ -803,6 +875,13 @@ def init_extra_db():
     CREATE TABLE IF NOT EXISTS clips(id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER,channel_id INTEGER,user_id INTEGER,url TEXT,note TEXT,created_at INTEGER);
     CREATE TABLE IF NOT EXISTS reminders(id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER,channel_id INTEGER,message TEXT,send_at INTEGER,sent INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS birthdays(guild_id INTEGER,user_id INTEGER,day INTEGER,month INTEGER,last_year INTEGER DEFAULT 0,PRIMARY KEY(guild_id,user_id));
+    CREATE TABLE IF NOT EXISTS automod_strikes(
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        strikes INTEGER NOT NULL DEFAULT 0,
+        last_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(guild_id,user_id)
+    );
     """)
 
 class FAQAdd(discord.ui.Modal,title="Добавить вопрос и ответ"):
@@ -919,43 +998,209 @@ class BirthdayPanel(discord.ui.View):
         if not (i.user.guild_permissions.manage_guild or i.user.guild_permissions.administrator):return await say(i,"Настраивать канал может только администрация.")
         await i.response.send_modal(BirthdaySetup())
 
-class AutomodPanel(discord.ui.View):
-    def __init__(self):super().__init__(timeout=180)
-    @discord.ui.button(label="Антиспам: вкл/выкл",emoji="🚫",style=discord.ButtonStyle.primary)
-    async def spam(self,i,b):
-        old=setting(i.guild.id,"automod_spam","0")=="1";set_setting(i.guild.id,"automod_spam","0" if old else "1")
-        await say(i,"Антиспам выключен." if old else "Антиспам включён: 6 сообщений за 8 секунд вызовут удаление и тайм-аут.")
-    @discord.ui.button(label="Фильтр ссылок: вкл/выкл",emoji="🔗",style=discord.ButtonStyle.primary)
-    async def links(self,i,b):
-        old=setting(i.guild.id,"automod_links","0")=="1";set_setting(i.guild.id,"automod_links","0" if old else "1")
-        await say(i,"Фильтр ссылок выключен." if old else "Фильтр ссылок включён: ссылки будут удаляться у участников без права управления сообщениями.")
-    @discord.ui.button(label="Статус автомодерации",emoji="📋")
-    async def status(self,i,b):
-        await say(i,f"Антиспам: **{'включён' if setting(i.guild.id,'automod_spam','0')=='1' else 'выключен'}**\nФильтр ссылок: **{'включён' if setting(i.guild.id,'automod_links','0')=='1' else 'выключен'}**")
+class AutomodSpamSettingsModal(discord.ui.Modal, title="Настройки антиспама"):
+    message_limit = discord.ui.TextInput(label="Сообщений для срабатывания", default="6", max_length=2)
+    window_seconds = discord.ui.TextInput(label="Интервал в секундах", default="8", max_length=3)
+    first_timeout = discord.ui.TextInput(label="Мут за первое нарушение (мин)", default="5", max_length=5)
+    second_timeout = discord.ui.TextInput(label="Мут за второе нарушение (мин)", default="10", max_length=5)
+    third_timeout = discord.ui.TextInput(label="Мут за третье нарушение (мин)", default="30", max_length=5)
 
+    async def on_submit(self, i):
+        limit = num(self.message_limit.value, 6)
+        window = num(self.window_seconds.value, 8)
+        first = num(self.first_timeout.value, 5)
+        second = num(self.second_timeout.value, 10)
+        third = num(self.third_timeout.value, 30)
+        if not (3 <= limit <= 30 and 3 <= window <= 60 and
+                1 <= first <= 10080 and 1 <= second <= 10080 and 1 <= third <= 10080):
+            return await say(
+                i,
+                "❌ Проверь значения: сообщений 3–30, интервал 3–60 секунд, "
+                "каждый мут 1–10080 минут."
+            )
+        set_setting(i.guild.id, "automod_spam_limit", limit)
+        set_setting(i.guild.id, "automod_spam_window", window)
+        set_setting(i.guild.id, "automod_timeout_1", first)
+        set_setting(i.guild.id, "automod_timeout_2", second)
+        set_setting(i.guild.id, "automod_timeout_3", third)
+        await say(
+            i,
+            "✅ **Настройки антиспама сохранены.**\n"
+            f"Порог: {limit} сообщений за {window} сек.\n"
+            f"Наказания: {first}, {second}, {third} мин.; следующее нарушение — кик."
+        )
+
+
+class AutomodDomainsModal(discord.ui.Modal, title="Разрешённые сайты"):
+    domains = discord.ui.TextInput(
+        label="Домены через запятую",
+        style=discord.TextStyle.paragraph,
+        max_length=1500,
+        required=False,
+        default="youtube.com, youtu.be, twitch.tv, discord.com, discord.gg"
+    )
+
+    async def on_submit(self, i):
+        parsed = []
+        invalid = []
+        for item in re.split(r"[,;\n]+", self.domains.value.lower()):
+            item = item.strip()
+            if not item:
+                continue
+            item = re.sub(r"^https?://", "", item)
+            item = item.split("/")[0].strip().strip(".")
+            item = item.removeprefix("www.")
+            if re.fullmatch(r"[a-z0-9.-]{1,253}", item) and ".." not in item:
+                parsed.append(item)
+            else:
+                invalid.append(item)
+        if invalid:
+            return await say(i, "❌ Некорректные домены: " + ", ".join(f"`{x}`" for x in invalid[:5]))
+        parsed = list(dict.fromkeys(parsed))
+        set_setting(i.guild.id, "automod_allowed_domains", ",".join(parsed))
+        await say(
+            i,
+            "✅ Список разрешённых сайтов сохранён.\n"
+            + ("\n".join(f"• `{x}`" for x in parsed) if parsed else "Разрешённых внешних сайтов нет.")
+        )
+
+
+class AutomodPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Антиспам: вкл/выкл", emoji="🚫", style=discord.ButtonStyle.primary)
+    async def spam(self, i, b):
+        old = setting(i.guild.id, "automod_spam", "1") == "1"
+        set_setting(i.guild.id, "automod_spam", "0" if old else "1")
+        await say(i, "Антиспам выключен." if old else "✅ Антиспам включён.")
+
+    @discord.ui.button(label="Фильтр сторонних ссылок: вкл/выкл", emoji="🔗", style=discord.ButtonStyle.primary)
+    async def links(self, i, b):
+        old = setting(i.guild.id, "automod_links", "1") == "1"
+        set_setting(i.guild.id, "automod_links", "0" if old else "1")
+        await say(
+            i,
+            "Фильтр сторонних ссылок выключен." if old
+            else "✅ Фильтр включён: ссылки на сайты вне белого списка будут удаляться, автор — исключаться."
+        )
+
+    @discord.ui.button(label="Фильтр казино: вкл/выкл", emoji="🎰", style=discord.ButtonStyle.danger)
+    async def casino(self, i, b):
+        old = setting(i.guild.id, "automod_casino", "1") == "1"
+        set_setting(i.guild.id, "automod_casino", "0" if old else "1")
+        await say(i, "Фильтр казино выключен." if old else "✅ Фильтр казино включён: реклама казино и ставок приведёт к удалению сообщения и кику.")
+
+    @discord.ui.button(label="Настроить наказания", emoji="⏱️", style=discord.ButtonStyle.success)
+    async def configure(self, i, b):
+        modal = AutomodSpamSettingsModal()
+        modal.message_limit.default = str(setting(i.guild.id, "automod_spam_limit", "6"))
+        modal.window_seconds.default = str(setting(i.guild.id, "automod_spam_window", "8"))
+        modal.first_timeout.default = str(setting(i.guild.id, "automod_timeout_1", "5"))
+        modal.second_timeout.default = str(setting(i.guild.id, "automod_timeout_2", "10"))
+        modal.third_timeout.default = str(setting(i.guild.id, "automod_timeout_3", "30"))
+        await i.response.send_modal(modal)
+
+    @discord.ui.button(label="Разрешённые сайты", emoji="🌐", style=discord.ButtonStyle.secondary)
+    async def allowlist(self, i, b):
+        modal = AutomodDomainsModal()
+        modal.domains.default = setting(
+            i.guild.id,
+            "automod_allowed_domains",
+            "youtube.com, youtu.be, twitch.tv, discord.com, discord.gg"
+        )
+        await i.response.send_modal(modal)
+
+    @discord.ui.button(label="Статус автомодерации", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def status(self, i, b):
+        allowed = setting(
+            i.guild.id,
+            "automod_allowed_domains",
+            "youtube.com, youtu.be, twitch.tv, discord.com, discord.gg"
+        )
+        body = (
+            f"**Антиспам:** {'включён' if setting(i.guild.id, 'automod_spam', '1') == '1' else 'выключен'}\n"
+            f"**Сторонние ссылки:** {'включены' if setting(i.guild.id, 'automod_links', '1') == '1' else 'выключены'}\n"
+            f"**Фильтр казино:** {'включён' if setting(i.guild.id, 'automod_casino', '1') == '1' else 'выключен'}\n"
+            f"**Порог антиспама:** {setting(i.guild.id, 'automod_spam_limit', '6')} сообщений за "
+            f"{setting(i.guild.id, 'automod_spam_window', '8')} сек.\n"
+            f"**Наказания:** {setting(i.guild.id, 'automod_timeout_1', '5')} / "
+            f"{setting(i.guild.id, 'automod_timeout_2', '10')} / "
+            f"{setting(i.guild.id, 'automod_timeout_3', '30')} мин. → кик\n"
+            f"**Разрешённые сайты:** `{allowed or 'нет'}`"
+        )
+        await say(i, emb=embed("🛡️ НАСТРОЙКИ АВТОМОДЕРАЦИИ", body))
 
 
 # ---------- Role requests with screenshot proof ----------
 
 class RoleRequestChannelsModal(discord.ui.Modal, title="Каналы заявок на роли"):
-    panel_channel_id = discord.ui.TextInput(label="ID канала публичной панели")
-    category_id = discord.ui.TextInput(label="ID категории приватных заявок")
-    reviewer_role_id = discord.ui.TextInput(label="ID роли администрации / проверяющих")
+    panel_channel_id = discord.ui.TextInput(label="ID канала публичной панели", max_length=25)
+    category_id = discord.ui.TextInput(label="ID категории приватных заявок", max_length=25)
+    reviewer_role_id = discord.ui.TextInput(label="ID роли администрации / проверяющих", max_length=25)
 
     async def on_submit(self, i):
-        panel = i.guild.get_channel(num(self.panel_channel_id.value))
-        category = i.guild.get_channel(num(self.category_id.value))
-        reviewer = i.guild.get_role(num(self.reviewer_role_id.value))
-        if not isinstance(panel, discord.TextChannel):
-            return await say(i, "Не найден текстовый канал публичной панели.")
-        if not isinstance(category, discord.CategoryChannel):
-            return await say(i, "Не найдена категория для приватных заявок.")
-        if not reviewer:
-            return await say(i, "Не найдена роль администрации / проверяющих.")
-        set_setting(i.guild.id, "role_request_panel_channel_id", panel.id)
-        set_setting(i.guild.id, "role_request_category_id", category.id)
-        set_setting(i.guild.id, "role_request_reviewer_role_id", reviewer.id)
-        await say(i, f"✅ Каналы настроены. Панель: {panel.mention}; категория заявок: **{category.name}**; проверяющие: {reviewer.mention}.")
+        try:
+            if i.guild is None:
+                return await i.response.send_message(
+                    "⛔ Форму можно отправлять только на сервере.", ephemeral=True
+                )
+
+            # Use the already-cached guild objects and reply immediately.
+            # No extra Discord API request is made before acknowledging the modal.
+            panel_id = num(self.panel_channel_id.value.strip())
+            category_id = num(self.category_id.value.strip())
+            reviewer_id = num(self.reviewer_role_id.value.strip())
+
+            panel = i.guild.get_channel(panel_id)
+            category = i.guild.get_channel(category_id)
+            reviewer = i.guild.get_role(reviewer_id)
+
+            if not isinstance(panel, discord.TextChannel):
+                return await i.response.send_message(
+                    "❌ Не найден текстовый канал публичной панели. "
+                    "Проверь ID канала и убедись, что он находится на этом сервере.",
+                    ephemeral=True
+                )
+            if not isinstance(category, discord.CategoryChannel):
+                return await i.response.send_message(
+                    "❌ Не найдена категория приватных заявок. "
+                    "Нужен ID категории Discord, а не ID текстового канала.",
+                    ephemeral=True
+                )
+            if reviewer is None:
+                return await i.response.send_message(
+                    "❌ Не найдена роль проверяющих. Проверь ID роли и убедись, что она создана на этом сервере.",
+                    ephemeral=True
+                )
+
+            set_setting(i.guild.id, "role_request_panel_channel_id", panel.id)
+            set_setting(i.guild.id, "role_request_category_id", category.id)
+            set_setting(i.guild.id, "role_request_reviewer_role_id", reviewer.id)
+
+            await i.response.send_message(
+                "✅ **Каналы и проверяющие успешно сохранены!**\n\n"
+                f"📢 Канал панели: {panel.mention}\n"
+                f"📂 Категория заявок: **{category.name}**\n"
+                f"🛡️ Проверяющие: {reviewer.mention}",
+                ephemeral=True
+            )
+        except Exception:
+            log.exception("Ошибка сохранения каналов системы заявок")
+            try:
+                if i.response.is_done():
+                    await i.followup.send(
+                        "❌ Не удалось сохранить настройки каналов. Подробности записаны в лог Bothost.",
+                        ephemeral=True
+                    )
+                else:
+                    await i.response.send_message(
+                        "❌ Не удалось сохранить настройки каналов. Подробности записаны в лог Bothost.",
+                        ephemeral=True
+                    )
+            except discord.HTTPException:
+                pass
+
 
 class RoleRequestRolesModal(discord.ui.Modal, title="Роли для системы заявок"):
     newbie_role_id = discord.ui.TextInput(label="ID роли «Новичок»", max_length=25)
@@ -967,13 +1212,11 @@ class RoleRequestRolesModal(discord.ui.Modal, title="Роли для систе�
     )
 
     async def on_submit(self, i):
-        # Acknowledge the modal immediately. This prevents Discord's generic
-        # "Something went wrong" message if role lookup or DB writes take time.
         try:
-            await i.response.defer(ephemeral=True, thinking=True)
-
             if i.guild is None:
-                return await i.followup.send("⛔ Эту форму можно отправлять только на сервере.", ephemeral=True)
+                return await i.response.send_message(
+                    "⛔ Форму можно отправлять только на сервере.", ephemeral=True
+                )
 
             newbie_id = num(self.newbie_role_id.value.strip())
             viewer_id = num(self.viewer_role_id.value.strip())
@@ -981,15 +1224,15 @@ class RoleRequestRolesModal(discord.ui.Modal, title="Роли для систе�
             pending_id = num(pending_text) if pending_text else 0
 
             if not newbie_id or not viewer_id:
-                return await i.followup.send(
-                    "❌ Укажи ID ролей «Новичок» и «Зритель». Поле «На проверке» можно оставить пустым.",
+                return await i.response.send_message(
+                    "❌ Укажи ID ролей «Новичок» и «Зритель». "
+                    "Поле «На проверке» можно оставить пустым.",
                     ephemeral=True
                 )
 
-            # Fetch roles from Discord instead of relying only on the local cache.
-            server_roles = await i.guild.fetch_roles()
-            roles_by_id = {role.id: role for role in server_roles}
-
+            # Guild roles are already cached after the bot connects to the server.
+            # Avoid fetch_roles() here: it makes an extra API request before the form reply.
+            roles_by_id = {role.id: role for role in i.guild.roles}
             newbie = roles_by_id.get(newbie_id)
             viewer = roles_by_id.get(viewer_id)
             pending = roles_by_id.get(pending_id) if pending_id else None
@@ -1003,25 +1246,23 @@ class RoleRequestRolesModal(discord.ui.Modal, title="Роли для систе�
                 missing.append(f"«На проверке» (`{pending_id}`)")
 
             if missing:
-                return await i.followup.send(
-                    "❌ На этом сервере не найдены следующие роли:\n"
+                return await i.response.send_message(
+                    "❌ На сервере не найдены следующие роли:\n"
                     + "\n".join(f"• {item}" for item in missing)
-                    + "\n\nПроверь, что ты скопировал именно ID ролей, а не ID каналов или участников.",
+                    + "\n\nПроверь, что скопировал именно ID ролей этого сервера.",
                     ephemeral=True
                 )
 
             if newbie.is_default() or viewer.is_default() or (pending and pending.is_default()):
-                return await i.followup.send(
+                return await i.response.send_message(
                     "❌ Нельзя использовать @everyone в качестве роли для заявок.",
                     ephemeral=True
                 )
 
-            # Store all role IDs. The optional pending role is stored as 0 when unused.
             set_setting(i.guild.id, "role_request_newbie_role_id", newbie.id)
             set_setting(i.guild.id, "role_request_viewer_role_id", viewer.id)
             set_setting(i.guild.id, "role_request_pending_role_id", pending.id if pending else 0)
 
-            # Inform the administrator if the bot's role hierarchy will prevent role assignment.
             bot_member = i.guild.me
             hierarchy_warning = ""
             if bot_member:
@@ -1031,7 +1272,7 @@ class RoleRequestRolesModal(discord.ui.Modal, title="Роли для систе�
                 ]
                 if blocked:
                     hierarchy_warning = (
-                        "\n\n⚠️ **Внимание:** роль бота должна находиться выше этих ролей: "
+                        "\n\n⚠️ **Внимание:** роль бота должна находиться выше: "
                         + ", ".join(f"**{name}**" for name in blocked)
                         + ". Перемести роль бота выше них в настройках ролей сервера."
                     )
@@ -1043,25 +1284,21 @@ class RoleRequestRolesModal(discord.ui.Modal, title="Роли для систе�
                 f"⏳ На проверке: {pending.mention if pending else 'не используется'}"
                 + hierarchy_warning
             )
-            await i.followup.send(result, ephemeral=True)
+            await i.response.send_message(result, ephemeral=True)
 
-        except discord.Forbidden:
-            log.exception("Нет прав Discord API при сохранении ролей заявок")
+        except Exception:
+            log.exception("Ошибка сохранения ролей системы заявок")
             try:
-                await i.followup.send(
-                    "⛔ Бот не смог получить список ролей. Проверь его доступ к серверу и разрешение View Channels.",
-                    ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
-        except Exception as exc:
-            log.exception("Ошибка в RoleRequestRolesModal.on_submit")
-            try:
-                await i.followup.send(
-                    "❌ Не удалось сохранить роли из-за внутренней ошибки. "
-                    "Открой консоль Bothost и пришли последние строки лога администрации.",
-                    ephemeral=True
-                )
+                if i.response.is_done():
+                    await i.followup.send(
+                        "❌ Не удалось сохранить роли. Подробности записаны в лог Bothost.",
+                        ephemeral=True
+                    )
+                else:
+                    await i.response.send_message(
+                        "❌ Не удалось сохранить роли. Подробности записаны в лог Bothost.",
+                        ephemeral=True
+                    )
             except discord.HTTPException:
                 pass
 
@@ -1459,6 +1696,34 @@ intents.message_content=True
 intents.voice_states=True
 intents.guilds=True
 
+_TWITCH_ACCESS_TOKEN = None
+_TWITCH_ACCESS_TOKEN_EXPIRES = 0
+
+
+async def get_twitch_access_token(session):
+    global _TWITCH_ACCESS_TOKEN, _TWITCH_ACCESS_TOKEN_EXPIRES
+    now = time.time()
+    if _TWITCH_ACCESS_TOKEN and now < _TWITCH_ACCESS_TOKEN_EXPIRES - 60:
+        return _TWITCH_ACCESS_TOKEN
+    async with session.post(
+        "https://id.twitch.tv/oauth2/token",
+        params={
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "grant_type": "client_credentials"
+        }
+    ) as response:
+        if response.status != 200:
+            log.warning("Twitch OAuth вернул HTTP %s", response.status)
+            return None
+        payload = await response.json()
+    token = payload.get("access_token")
+    if token:
+        _TWITCH_ACCESS_TOKEN = token
+        _TWITCH_ACCESS_TOKEN_EXPIRES = now + int(payload.get("expires_in", 3600))
+    return token
+
+
 class CreatorBot(commands.Bot):
     async def setup_hook(self):
         init_db(); init_extra_db()
@@ -1543,7 +1808,16 @@ class CreatorBot(commands.Bot):
                     if not r["last_video_id"]:run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]));continue
                     if vid!=r["last_video_id"]:
                         g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
-                        if ch:await ch.send(embed=embed("🔴 НОВОЕ ВИДЕО НА YOUTUBE",f"**{title}**\n{link}",discord.Color.red()))
+                        if ch:
+                            notice = discord.Embed(
+                                title="🔴 НОВОЕ ВИДЕО НА YOUTUBE",
+                                description=f"**[{discord.utils.escape_markdown(title)}]({link})**\n\nНа канале вышел новый ролик! Заглядывай смотреть 💜",
+                                color=discord.Color.red(),
+                                timestamp=datetime.now(timezone.utc)
+                            )
+                            notice.set_thumbnail(url=f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
+                            notice.set_footer(text="TomsyYouTube • Уведомления YouTube")
+                            await ch.send(embed=notice)
                         run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]))
                 except Exception as e:log.warning("YouTube feed: %s",e)
     @youtube_task.before_loop
@@ -1554,7 +1828,7 @@ class CreatorBot(commands.Bot):
         if not rows or not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:return
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.post("https://id.twitch.tv/oauth2/token",params={"client_id":TWITCH_CLIENT_ID,"client_secret":TWITCH_CLIENT_SECRET,"grant_type":"client_credentials"}) as rr:token=(await rr.json()).get("access_token")
+                token = await get_twitch_access_token(s)
                 if not token:return
                 headers={"Client-ID":TWITCH_CLIENT_ID,"Authorization":f"Bearer {token}"}
                 for r in rows:
@@ -1566,7 +1840,23 @@ class CreatorBot(commands.Bot):
                         g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
                         if ch:
                             url=f"https://twitch.tv/{r['username']}"
-                            await ch.send(embed=embed("🟣 НАЧАЛАСЬ ТРАНСЛЯЦИЯ!",f"**{r['username']}** уже в эфире!\n**Название:** {stream.get('title','Прямой эфир')}\n**Категория:** {stream.get('game_name','Twitch')}\n{url}",discord.Color.from_rgb(145,70,255)))
+                            notice = discord.Embed(
+                                title="🟣 НАЧАЛАСЬ ТРАНСЛЯЦИЯ!",
+                                description=(
+                                    f"**{r['username']}** уже в эфире!\n\n"
+                                    f"**Название:** {discord.utils.escape_markdown(stream.get('title', 'Прямой эфир'))}\n"
+                                    f"**Категория:** {discord.utils.escape_markdown(stream.get('game_name') or 'Twitch')}\n"
+                                    f"**Зрителей:** {stream.get('viewer_count', 0)}\n\n"
+                                    f"[Смотреть трансляцию]({url})"
+                                ),
+                                color=discord.Color.from_rgb(145,70,255),
+                                timestamp=datetime.now(timezone.utc)
+                            )
+                            thumb = stream.get("thumbnail_url", "").replace("{width}", "640").replace("{height}", "360")
+                            if thumb:
+                                notice.set_image(url=thumb)
+                            notice.set_footer(text="TomsyYouTube • Уведомления Twitch")
+                            await ch.send(embed=notice)
                         run("UPDATE twitch_channels SET last_stream_id=? WHERE id=?",(sid,r["id"]))
         except Exception as e:log.warning("Twitch API: %s",e)
     @twitch_task.before_loop
@@ -1647,27 +1937,211 @@ async def c_settings(i):await panel_cmd(i,"⚙️ Настройки бота",S
 from collections import defaultdict, deque
 _spam = defaultdict(deque)
 
-@bot.listen("on_message")
-async def automod_listener(message):
-    if not message.guild or message.author.bot:return
-    member=message.author
-    if member.guild_permissions.manage_messages or member.guild_permissions.administrator:return
-    if setting(message.guild.id,"automod_links","0")=="1" and re.search(r"https?://",message.content or "",re.I):
+_spam = defaultdict(deque)
+
+DEFAULT_ALLOWED_DOMAINS = (
+    "youtube.com", "youtu.be", "twitch.tv", "discord.com", "discord.gg"
+)
+CASINO_PATTERN = re.compile(
+    r"(?i)(?:\bcasino\b|\bcas[i1]no\b|казино|букмекер\w*|ставк\w*|"
+    r"слот\w*|рулетк\w*|\b1win\b|\bmelbet\b|\bmostbet\b|\bvavada\b|"
+    r"вавада|\bparimatch\b|\bstake\b|\bpin[\s-]?up\b)"
+)
+URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+(?:com|net|org|ru|io|gg|tv|me|info|biz|app|site|online|casino|bet)(?:/[^\s<>()]*)?")
+
+
+def extract_domains(text):
+    found = []
+    for raw in URL_PATTERN.findall(text or ""):
+        cleaned = raw.rstrip(".,!?;:])}>\"'")
+        if cleaned.lower().startswith("www."):
+            cleaned = "https://" + cleaned
+        parsed = urlsplit(cleaned if "://" in cleaned else "https://" + cleaned)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if host:
+            found.append(host)
+    return found
+
+
+def allowed_domain(host, allowed):
+    return any(host == domain or host.endswith("." + domain) for domain in allowed)
+
+
+async def notify_and_kick(member, reason, title="🚫 НАРУШЕНИЕ ПРАВИЛ СЕРВЕРА"):
+    guild = member.guild
+    try:
+        # Kick first so the DM never falsely claims that an unsuccessful kick happened.
+        await member.kick(reason=reason)
+    except discord.Forbidden:
+        await log_to(
+            guild,
+            f"⚠️ Автомодерация обнаружила нарушение у {member.mention}, "
+            "но не смогла исключить участника. Проверь право Kick Members и иерархию ролей."
+        )
+        return False
+    except discord.HTTPException as exc:
+        await log_to(guild, f"⚠️ Не удалось исключить {member.mention}: {exc}")
+        return False
+
+    dm = discord.Embed(
+        title=title,
+        description=(
+            f"Ты был исключён с сервера **{guild.name}**.\n\n"
+            f"**Причина:** {reason}\n\n"
+            "Если считаешь, что произошла ошибка, свяжись с администрацией сервера."
+        ),
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    dm.set_footer(text="TomsyYouTube • Автоматическая модерация")
+    try:
+        await member.send(embed=dm)
+    except discord.HTTPException:
+        log.info("Не удалось отправить DM после кика: %s", member.id)
+
+    await log_to(guild, f"⛔ Автомодерация исключила **{member}**. Причина: **{reason}**")
+    return True
+
+async def apply_spam_strike(message):
+    guild = message.guild
+    member = message.author
+    now = int(time.time())
+    row = one(
+        "SELECT strikes,last_at FROM automod_strikes WHERE guild_id=? AND user_id=?",
+        (guild.id, member.id)
+    )
+    strikes = row["strikes"] if row and now - row["last_at"] <= 30 * 86400 else 0
+    strikes += 1
+    run(
+        "INSERT INTO automod_strikes(guild_id,user_id,strikes,last_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(guild_id,user_id) DO UPDATE SET strikes=excluded.strikes,last_at=excluded.last_at",
+        (guild.id, member.id, strikes, now)
+    )
+    reason = "Флуд сообщениями"
+    run(
+        "INSERT INTO warnings(guild_id,user_id,moderator_id,reason,created_at) VALUES(?,?,?,?,?)",
+        (guild.id, member.id, bot.user.id if bot.user else 0, reason, now)
+    )
+
+    # Remove a batch of the member's recent messages from this channel.
+    try:
+        await message.channel.purge(
+            limit=30,
+            check=lambda m: m.author.id == member.id and
+            (datetime.now(timezone.utc) - m.created_at).total_seconds() <=
+            num(setting(guild.id, "automod_spam_window", "8"), 8) + 3
+        )
+    except discord.HTTPException:
         try:
             await message.delete()
-            await message.channel.send(f"{member.mention}, ссылки в этом канале запрещены.",delete_after=5)
-            await log_to(message.guild,f"🔗 Удалена ссылка от {member.mention}.")
-        except discord.HTTPException:pass
-    if setting(message.guild.id,"automod_spam","0")=="1":
-        key=(message.guild.id,member.id);now=time.time();q=_spam[key];q.append(now)
-        while q and now-q[0]>8:q.popleft()
-        if len(q)>=6:
-            q.clear()
+        except discord.HTTPException:
+            pass
+
+    if strikes >= 4:
+        reason_text = "Повторный флуд: три предыдущих предупреждения и тайм-аута не исправили нарушение"
+        await notify_and_kick(member, reason_text, "👢 ИСКЛЮЧЕНИЕ ЗА ПОВТОРНЫЙ СПАМ")
+        run("DELETE FROM automod_strikes WHERE guild_id=? AND user_id=?", (guild.id, member.id))
+        return
+
+    duration = num(setting(guild.id, f"automod_timeout_{strikes}", str((5, 10, 30)[strikes - 1])),
+                   (5, 10, 30)[strikes - 1])
+    duration = max(1, min(10080, duration))
+    try:
+        await member.timeout(
+            datetime.now(timezone.utc) + timedelta(minutes=duration),
+            reason=f"Антиспам: предупреждение {strikes}/3. {reason}"
+        )
+        action = f"тайм-аут на **{duration} минут**"
+        dm = discord.Embed(
+            title=f"⚠️ ПРЕДУПРЕЖДЕНИЕ {strikes}/3",
+            description=(
+                f"На сервере **{guild.name}** сработала система антиспама.\n\n"
+                f"**Причина:** {reason}\n"
+                f"**Наказание:** {action}\n\n"
+                + (
+                    "Следующее нарушение приведёт к более длительному тайм-ауту."
+                    if strikes < 3 else
+                    "Следующее нарушение приведёт к исключению с сервера."
+                )
+            ),
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        dm.set_footer(text="TomsyYouTube • Автоматическая модерация")
+        try:
+            await member.send(embed=dm)
+        except discord.HTTPException:
+            log.info("Не удалось отправить DM о тайм-ауте: %s", member.id)
+        await log_to(
+            guild,
+            f"⚠️ Антиспам: {member.mention}, предупреждение **{strikes}/3**, "
+            f"тайм-аут **{duration} мин.**"
+        )
+    except discord.Forbidden:
+        await log_to(
+            guild,
+            f"⚠️ Антиспам обнаружил флуд у {member.mention}, но бот не смог выдать тайм-аут. "
+            "Проверь право Moderate Members и иерархию ролей."
+        )
+    except discord.HTTPException as exc:
+        await log_to(guild, f"⚠️ Не удалось применить антиспам-наказание к {member.mention}: {exc}")
+
+
+@bot.listen("on_message")
+async def automod_listener(message):
+    if not message.guild or message.author.bot:
+        return
+    member = message.author
+    if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
+        return
+
+    content = message.content or ""
+
+    # Casino/gambling promotion is treated as an immediate kick.
+    if setting(message.guild.id, "automod_casino", "1") == "1" and CASINO_PATTERN.search(content):
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        await notify_and_kick(member, "Реклама казино, азартных игр или букмекерских ставок")
+        return
+
+    # External URLs are allowed only when their domain is in the configured allowlist.
+    if setting(message.guild.id, "automod_links", "1") == "1":
+        allowed = [
+            x.strip().lower().removeprefix("www.")
+            for x in setting(
+                message.guild.id,
+                "automod_allowed_domains",
+                ",".join(DEFAULT_ALLOWED_DOMAINS)
+            ).split(",")
+            if x.strip()
+        ]
+        blocked = [host for host in extract_domains(content) if not allowed_domain(host, allowed)]
+        if blocked:
             try:
-                await message.channel.purge(limit=6,check=lambda m:m.author.id==member.id)
-                await member.timeout(datetime.now(timezone.utc)+timedelta(seconds=60),reason="Автоматический антиспам")
-                await log_to(message.guild,f"🚫 Антиспам: {member.mention} получил тайм-аут на 60 секунд.")
-            except discord.HTTPException:pass
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            await notify_and_kick(
+                member,
+                "Публикация сторонней ссылки, не входящей в список разрешённых сайтов: "
+                + ", ".join(f"`{x}`" for x in blocked[:3])
+            )
+            return
+
+    # Progressive anti-spam: 5 / 10 / 30 minutes, then kick on the next violation.
+    if setting(message.guild.id, "automod_spam", "1") == "1":
+        key = (message.guild.id, member.id)
+        now = time.time()
+        q = _spam[key]
+        q.append(now)
+        while q and now - q[0] > num(setting(message.guild.id, "automod_spam_window", "8"), 8):
+            q.popleft()
+        limit = max(3, num(setting(message.guild.id, "automod_spam_limit", "6"), 6))
+        if len(q) >= limit:
+            q.clear()
+            await apply_spam_strike(message)
 
 @tasks.loop(seconds=30)
 async def reminders_loop():
@@ -1704,7 +2178,24 @@ async def c_reminders(i):await panel_cmd(i,"⏰ Панель напоминан�
 @bot.tree.command(name="birthday",description="Открыть панель дней рождения")
 async def c_birthday(i):await say(i,"🎂 Панель дней рождения",view=BirthdayPanel())
 @bot.tree.command(name="automod",description="Открыть панель автомодерации")
-async def c_automod(i):await panel_cmd(i,"🚫 Панель автомодерации",AutomodPanel())
+async def c_automod(i):
+    if not await admin(i):
+        return
+    defaults = {
+        "automod_spam": "1",
+        "automod_links": "1",
+        "automod_casino": "1",
+        "automod_spam_limit": "6",
+        "automod_spam_window": "8",
+        "automod_timeout_1": "5",
+        "automod_timeout_2": "10",
+        "automod_timeout_3": "30",
+        "automod_allowed_domains": "youtube.com,youtu.be,twitch.tv,discord.com,discord.gg",
+    }
+    for key, value in defaults.items():
+        if setting(i.guild.id, key) is None:
+            set_setting(i.guild.id, key, value)
+    await say(i, "**🛡️ Панель автомодерации**\nВсе действия доступны через кнопки панели.", view=AutomodPanel())
 
 if __name__=="__main__":
     if not TOKEN:raise SystemExit("Токен не найден. На хостинге добавь BOT_TOKEN или DISCORD_TOKEN; локально заполни .env.")

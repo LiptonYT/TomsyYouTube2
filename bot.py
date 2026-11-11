@@ -146,7 +146,7 @@ class RoleSelect(discord.ui.Select):
         if added: msg.append("Выданы: " + ", ".join(added))
         if removed: msg.append("Сняты: " + ", ".join(removed))
         if failed: msg.append("Не удалось изменить: " + ", ".join(failed) + ". Проверь иерархию ролей бота.")
-        await say(i, "\\n".join(msg) if msg else "Роли не изменены.")
+        await say(i, "\n".join(msg) if msg else "Роли не изменены.")
 class RoleSelectView(discord.ui.View):
     def __init__(self, gid, role_ids, guild):
         super().__init__(timeout=None); self.add_item(RoleSelect(gid, role_ids, guild))
@@ -263,7 +263,7 @@ class RulesView(discord.ui.View):
     @discord.ui.button(label="Список",emoji="📋",style=discord.ButtonStyle.secondary)
     async def listing(self,i,b):
         rows=many("SELECT id,title,body FROM rules WHERE guild_id=? ORDER BY id",(i.guild.id,))
-        text="\\n".join(f"**{r['id']}. {r['title']}** — {r['body'][:160]}" for r in rows) or "Правил пока нет."
+        text="\n".join(f"**{r['id']}. {r['title']}** — {r['body'][:160]}" for r in rows) or "Правил пока нет."
         await say(i,text[:1900])
     @discord.ui.button(label="Канал",emoji="📢",style=discord.ButtonStyle.secondary)
     async def channel(self,i,b): await i.response.send_modal(RuleChannel())
@@ -293,7 +293,7 @@ class VoiceView(discord.ui.View):
     async def check(self,i,b):
         t=i.guild.get_channel(num(setting(i.guild.id,"voice_trigger_id")))
         c=i.guild.get_channel(num(setting(i.guild.id,"voice_category_id")))
-        await say(i,f"Канал-триггер: {t.mention if t else 'не настроен'}\\nКатегория: {c.name if c else 'не задана'}")
+        await say(i,f"Канал-триггер: {t.mention if t else 'не настроен'}\nКатегория: {c.name if c else 'не задана'}")
 class RoomModal(discord.ui.Modal):
     def __init__(self,action):
         titles={"rename":"Название комнаты","limit":"Лимит участников","transfer":"Передать владельца","invite":"Пригласить участника","kick":"Исключить участника"}
@@ -375,7 +375,7 @@ async def make_room(member):
                 member:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
     text=await g.create_text_channel(f"💬・комната-{safe}"[:95],category=cat,overwrites=text_perms)
     run("INSERT OR REPLACE INTO voice_rooms VALUES(?,?,?,?)",(g.id,voice.id,text.id,member.id))
-    await text.send(embed=embed("🎙️ Управление вашей комнатой",f"Владелец: {member.mention}\\nНастрой комнату кнопками ниже."),view=RoomControls())
+    await text.send(embed=embed("🎙️ Управление вашей комнатой",f"Владелец: {member.mention}\nНастрой комнату кнопками ниже."),view=RoomControls())
     await member.move_to(voice)
 
 # ---------- Tickets ----------
@@ -481,7 +481,7 @@ class GiveawayCreate(discord.ui.Modal,title="Создать розыгрыш"):
         if not isinstance(ch,discord.TextChannel): return await say(i,"Канал не найден.")
         end=int(time.time())+mins*60
         cur=run("INSERT INTO giveaways(guild_id,channel_id,prize,winners,end_at) VALUES(?,?,?,?,?)",(i.guild.id,ch.id,self.prize.value,count,end))
-        msg=await ch.send(embed=embed("🎁 РОЗЫГРЫШ",f"**Приз:** {self.prize.value}\\n**Победителей:** {count}\\n**Завершение:** <t:{end}:R>\\n\\nНажми кнопку, чтобы участвовать!",discord.Color.gold()),view=GiveawayEntry())
+        msg=await ch.send(embed=embed("🎁 РОЗЫГРЫШ",f"**Приз:** {self.prize.value}\n**Победителей:** {count}\n**Завершение:** <t:{end}:R>\n\nНажми кнопку, чтобы участвовать!",discord.Color.gold()),view=GiveawayEntry())
         run("UPDATE giveaways SET message_id=? WHERE id=?",(msg.id,cur.lastrowid))
         await say(i,f"✅ Розыгрыш опубликован в {ch.mention}.")
 class GiveawayEntry(discord.ui.View):
@@ -515,7 +515,7 @@ class EventCreate(discord.ui.Modal,title="Создать мероприятие"
             ev=await i.guild.create_scheduled_event(name=self.name.value,start_time=start,end_time=end,
                 privacy_level=discord.PrivacyLevel.guild_only,entity_type=discord.EntityType.external,
                 location=location,description=self.description.value)
-            e=embed("🎉 НОВОЕ МЕРОПРИЯТИЕ",f"**{self.name.value}**\\n{self.description.value}\\n\\n🕒 <t:{int(start.timestamp())}:F>\\n📍 {location}\\n[Открыть событие]({ev.url})",discord.Color.green())
+            e=embed("🎉 НОВОЕ МЕРОПРИЯТИЕ",f"**{self.name.value}**\n{self.description.value}\n\n🕒 <t:{int(start.timestamp())}:F>\n📍 {location}\n[Открыть событие]({ev.url})",discord.Color.green())
             await ch.send(embed=e); await say(i,"✅ Событие создано и опубликовано.")
         except (ValueError,discord.HTTPException) as exc: await say(i,f"Не удалось создать событие. Проверь дату и права бота. {exc}")
 class EventPanel(discord.ui.View):
@@ -554,7 +554,7 @@ class ApplicationForm(discord.ui.Modal,title="Заявка в команду"):
     async def on_submit(self,i):
         ch=i.guild.get_channel(num(setting(i.guild.id,"applications_channel_id")))
         if not isinstance(ch,discord.TextChannel): return await say(i,"Канал заявок не настроен.")
-        e=embed("📝 НОВАЯ ЗАЯВКА",f"**Кандидат:** {i.user.mention}\\n**Должность:** {self.position.value}\\n\\n**О себе:**\\n{self.about.value}\\n\\n**Опыт:**\\n{self.experience.value or 'Не указан'}")
+        e=embed("📝 НОВАЯ ЗАЯВКА",f"**Кандидат:** {i.user.mention}\n**Должность:** {self.position.value}\n\n**О себе:**\n{self.about.value}\n\n**Опыт:**\n{self.experience.value or 'Не указан'}")
         msg=await ch.send(embed=e,view=ApplicationReview())
         run("INSERT INTO applications(guild_id,channel_id,message_id,user_id,position,about,experience) VALUES(?,?,?,?,?,?,?)",
             (i.guild.id,ch.id,msg.id,i.user.id,self.position.value,self.about.value,self.experience.value))
@@ -605,7 +605,7 @@ class SuggestionForm(discord.ui.Modal,title="Новое предложение")
     async def on_submit(self,i):
         ch=i.guild.get_channel(num(setting(i.guild.id,"suggestions_channel_id")))
         if not isinstance(ch,discord.TextChannel): return await say(i,"Канал предложений не настроен.")
-        msg=await ch.send(embed=embed("💡 ПРЕДЛОЖЕНИЕ",f"**Автор:** {i.user.mention}\\n\\n{self.body.value}"),view=SuggestionVote())
+        msg=await ch.send(embed=embed("💡 ПРЕДЛОЖЕНИЕ",f"**Автор:** {i.user.mention}\n\n{self.body.value}"),view=SuggestionVote())
         run("INSERT INTO suggestions(guild_id,channel_id,message_id,user_id,body) VALUES(?,?,?,?,?)",(i.guild.id,ch.id,msg.id,i.user.id,self.body.value))
         await say(i,"✅ Предложение отправлено.")
 class SuggestionVote(discord.ui.View):
@@ -634,7 +634,7 @@ class PollForm(discord.ui.Modal,title="Создать опрос"):
         ch=i.guild.get_channel(num(self.channel_id.value)); opts=[x.strip() for x in self.options.value.split("|") if x.strip()][:10]
         if not isinstance(ch,discord.TextChannel) or len(opts)<2: return await say(i,"Проверь канал и укажи минимум два варианта через |.")
         nums_emoji=["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-        msg=await ch.send(embed=embed("📊 ОПРОС: "+self.question.value,"\\n".join(f"{nums_emoji[n]} {x}" for n,x in enumerate(opts))))
+        msg=await ch.send(embed=embed("📊 ОПРОС: "+self.question.value,"\n".join(f"{nums_emoji[n]} {x}" for n,x in enumerate(opts))))
         for em in nums_emoji[:len(opts)]: await msg.add_reaction(em)
         await say(i,f"Опрос опубликован в {ch.mention}.")
 class PollAdmin(discord.ui.View):
@@ -655,12 +655,12 @@ class LevelsPanel(discord.ui.View):
     @discord.ui.button(label="Мой профиль",emoji="👤")
     async def profile(self,i,b):
         r=level_row(i.guild.id,i.user.id)
-        e=embed(f"⭐ {i.user.display_name}",f"Уровень: **{r['level']}**\\nОпыт: **{r['xp']} XP**\\nСообщений: **{r['messages']}**\\nМонеты: **{r['coins']}**")
+        e=embed(f"⭐ {i.user.display_name}",f"Уровень: **{r['level']}**\nОпыт: **{r['xp']} XP**\nСообщений: **{r['messages']}**\nМонеты: **{r['coins']}**")
         e.set_thumbnail(url=i.user.display_avatar.url); await say(i,emb=e)
     @discord.ui.button(label="Топ участников",emoji="🏆",style=discord.ButtonStyle.success)
     async def top(self,i,b):
         rows=many("SELECT user_id,level,xp FROM levels WHERE guild_id=? ORDER BY level DESC,xp DESC LIMIT 10",(i.guild.id,))
-        text="\\n".join(f"**{n}.** <@{r['user_id']}> — уровень {r['level']} ({r['xp']} XP)" for n,r in enumerate(rows,1)) or "Статистики пока нет."
+        text="\n".join(f"**{n}.** <@{r['user_id']}> — уровень {r['level']} ({r['xp']} XP)" for n,r in enumerate(rows,1)) or "Статистики пока нет."
         await say(i,emb=embed("🏆 ТОП УЧАСТНИКОВ",text))
 class AchievementsPanel(discord.ui.View):
     def __init__(self): super().__init__(timeout=180)
@@ -673,7 +673,7 @@ class AchievementsPanel(discord.ui.View):
         if r["level"]>=5:a.append("⭐ Уровень 5")
         if r["level"]>=10:a.append("🌟 Уровень 10")
         if r["coins"]>=500:a.append("💰 500 монет")
-        await say(i,emb=embed("🏅 ДОСТИЖЕНИЯ","\\n".join(a) or "Пока нет достижений. Будь активнее!"))
+        await say(i,emb=embed("🏅 ДОСТИЖЕНИЯ","\n".join(a) or "Пока нет достижений. Будь активнее!"))
 class ShopAdd(discord.ui.Modal,title="Добавить роль в магазин"):
     role_id=discord.ui.TextInput(label="ID роли"); cost=discord.ui.TextInput(label="Цена в монетах")
     async def on_submit(self,i):
@@ -746,7 +746,7 @@ class YouTubePanel(discord.ui.View):
     @discord.ui.button(label="Список каналов",emoji="📋")
     async def listing(self,i,b):
         rows=many("SELECT id,channel_id,feed_url FROM youtube_feeds WHERE guild_id=?",(i.guild.id,))
-        await say(i,"\\n".join(f"ID {r['id']} → <#{r['channel_id']}> • `{r['feed_url'].split('channel_id=')[-1]}`" for r in rows) or "Список пуст.")
+        await say(i,"\n".join(f"ID {r['id']} → <#{r['channel_id']}> • `{r['feed_url'].split('channel_id=')[-1]}`" for r in rows) or "Список пуст.")
     @discord.ui.button(label="Удалить канал",emoji="🗑️",style=discord.ButtonStyle.danger)
     async def remove(self,i,b):await i.response.send_modal(YTRemove())
 class TwitchAdd(discord.ui.Modal,title="Добавить Twitch-канал"):
@@ -767,7 +767,7 @@ class TwitchPanel(discord.ui.View):
     @discord.ui.button(label="Список каналов",emoji="📋")
     async def listing(self,i,b):
         rows=many("SELECT id,channel_id,username FROM twitch_channels WHERE guild_id=?",(i.guild.id,))
-        await say(i,"\\n".join(f"ID {r['id']} → **{r['username']}** в <#{r['channel_id']}>" for r in rows) or "Список пуст.")
+        await say(i,"\n".join(f"ID {r['id']} → **{r['username']}** в <#{r['channel_id']}>" for r in rows) or "Список пуст.")
     @discord.ui.button(label="Удалить канал",emoji="🗑️",style=discord.ButtonStyle.danger)
     async def remove(self,i,b):await i.response.send_modal(TwitchRemove())
 
@@ -790,7 +790,7 @@ class SettingsPanel(discord.ui.View):
     @discord.ui.button(label="Показать настройки",emoji="📋")
     async def show(self,i,b):
         keys=["welcome_channel_id","rules_channel_id","role_channel_id","logs_channel_id","ticket_category_id","ticket_panel_channel_id","voice_trigger_id","voice_category_id","applications_channel_id","suggestions_channel_id"]
-        await say(i,emb=embed("⚙️ НАСТРОЙКИ","\\n".join(f"**{k}:** `{setting(i.guild.id,k) or 'не настроено'}`" for k in keys)))
+        await say(i,emb=embed("⚙️ НАСТРОЙКИ","\n".join(f"**{k}:** `{setting(i.guild.id,k) or 'не настроено'}`" for k in keys)))
     @discord.ui.button(label="Статус бота",emoji="🤖",style=discord.ButtonStyle.success)
     async def status(self,i,b):await say(i,f"✅ Бот работает. Задержка: **{round(bot.latency*1000)} мс**. База данных: SQLite.")
 
@@ -833,7 +833,7 @@ class FAQPanel(discord.ui.View):
     @discord.ui.button(label="Список вопросов",emoji="📋")
     async def listing(self,i,b):
         rows=many("SELECT id,question FROM faqs WHERE guild_id=? ORDER BY id",(i.guild.id,))
-        await say(i,"\\n".join(f"**{r['id']}.** {r['question']}" for r in rows) or "FAQ пока пуст.")
+        await say(i,"\n".join(f"**{r['id']}.** {r['question']}" for r in rows) or "FAQ пока пуст.")
     @discord.ui.button(label="Опубликовать FAQ",emoji="📢",style=discord.ButtonStyle.success)
     async def publish(self,i,b):
         ch=i.guild.get_channel(num(setting(i.guild.id,"faq_channel_id")));rows=many("SELECT question,answer FROM faqs WHERE guild_id=? ORDER BY id",(i.guild.id,))
@@ -869,7 +869,7 @@ class ClipForm(discord.ui.Modal,title="Отправить клип"):
         ch=i.guild.get_channel(num(setting(i.guild.id,"clips_channel_id")))
         if not isinstance(ch,discord.TextChannel):return await say(i,"Канал клипов не настроен.")
         if not re.match(r"https?://",self.url.value.strip()):return await say(i,"Укажи корректную ссылку, начинающуюся с http:// или https://.")
-        e=embed("🎞️ НОВЫЙ КЛИП",f"**Автор:** {i.user.mention}\\n**Ссылка:** {self.url.value}\\n**Комментарий:** {self.note.value or 'Нет'}")
+        e=embed("🎞️ НОВЫЙ КЛИП",f"**Автор:** {i.user.mention}\n**Ссылка:** {self.url.value}\n**Комментарий:** {self.note.value or 'Нет'}")
         await ch.send(embed=e);run("INSERT INTO clips(guild_id,channel_id,user_id,url,note,created_at) VALUES(?,?,?,?,?,?)",(i.guild.id,ch.id,i.user.id,self.url.value,self.note.value,int(time.time())))
         await say(i,"✅ Клип отправлен команде.")
 
@@ -892,7 +892,7 @@ class ReminderPanel(discord.ui.View):
     @discord.ui.button(label="Мои напоминания сервера",emoji="📋")
     async def listing(self,i,b):
         rows=many("SELECT id,channel_id,message,send_at FROM reminders WHERE guild_id=? AND sent=0 ORDER BY send_at LIMIT 15",(i.guild.id,))
-        text="\\n".join(f"**#{r['id']}** <t:{r['send_at']}:R> в <#{r['channel_id']}> — {r['message'][:80]}" for r in rows) or "Активных напоминаний нет."
+        text="\n".join(f"**#{r['id']}** <t:{r['send_at']}:R> в <#{r['channel_id']}> — {r['message'][:80]}" for r in rows) or "Активных напоминаний нет."
         await say(i,text[:1900])
 
 class BirthdaySet(discord.ui.Modal,title="Установить день рождения"):
@@ -931,7 +931,7 @@ class AutomodPanel(discord.ui.View):
         await say(i,"Фильтр ссылок выключен." if old else "Фильтр ссылок включён: ссылки будут удаляться у участников без права управления сообщениями.")
     @discord.ui.button(label="Статус автомодерации",emoji="📋")
     async def status(self,i,b):
-        await say(i,f"Антиспам: **{'включён' if setting(i.guild.id,'automod_spam','0')=='1' else 'выключен'}**\\nФильтр ссылок: **{'включён' if setting(i.guild.id,'automod_links','0')=='1' else 'выключен'}**")
+        await say(i,f"Антиспам: **{'включён' if setting(i.guild.id,'automod_spam','0')=='1' else 'выключен'}**\nФильтр ссылок: **{'включён' if setting(i.guild.id,'automod_links','0')=='1' else 'выключен'}**")
 
 
 
@@ -1090,8 +1090,8 @@ class RoleRequestAdminPanel(discord.ui.View):
         panel = discord.Embed(
             title="🎭  ПОЛУЧЕНИЕ РОЛЕЙ",
             description=(
-                "Добро пожаловать в **TomsyYouTube**!\\n"
-                "Выбери подходящую роль сообщества с помощью кнопок ниже.\\n\\n"
+                "Добро пожаловать в **TomsyYouTube**!\n"
+                "Выбери подходящую роль сообщества с помощью кнопок ниже.\n\n"
                 "━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.from_rgb(145, 70, 255),
@@ -1108,7 +1108,7 @@ class RoleRequestAdminPanel(discord.ui.View):
         panel.add_field(
             name="🆕  НОВИЧОК",
             value=(
-                "Для новых участников сервера.\\n"
+                "Для новых участников сервера.\n"
                 "**Нажми кнопку — роль выдастся сразу.**"
             ),
             inline=True
@@ -1116,7 +1116,7 @@ class RoleRequestAdminPanel(discord.ui.View):
         panel.add_field(
             name="🔴  YOUTUBE",
             value=(
-                "Подписан на YouTube?\\n"
+                "Подписан на YouTube?\n"
                 "Отправь скриншот подписки в приватную заявку."
             ),
             inline=True
@@ -1124,7 +1124,7 @@ class RoleRequestAdminPanel(discord.ui.View):
         panel.add_field(
             name="🟣  TWITCH",
             value=(
-                "Подписан на Twitch?\\n"
+                "Подписан на Twitch?\n"
                 "Отправь скриншот подписки в приватную заявку."
             ),
             inline=True
@@ -1132,10 +1132,10 @@ class RoleRequestAdminPanel(discord.ui.View):
         panel.add_field(
             name="📋  КАК ПОЛУЧИТЬ РОЛЬ ЗРИТЕЛЯ",
             value=(
-                "1. Выбери YouTube или Twitch.\\n"
-                "2. Бот откроет личный канал заявки.\\n"
-                "3. Прикрепи скриншот, где видна подписка.\\n"
-                "4. Дождись проверки администрации.\\n\\n"
+                "1. Выбери YouTube или Twitch.\n"
+                "2. Бот откроет личный канал заявки.\n"
+                "3. Прикрепи скриншот, где видна подписка.\n"
+                "4. Дождись проверки администрации.\n\n"
                 "✅ После одобрения бот выдаст роль **Зритель**."
             ),
             inline=False
@@ -1304,8 +1304,8 @@ class RoleRequestReviewView(discord.ui.View):
             decision_label = "ОДОБРЕНА"
             decision_color = discord.Color.from_rgb(46, 204, 113)
             dm_description = (
-                "Отличные новости! Твоя заявка успешно прошла проверку.\\n"
-                f"Тебе выдана роль {target_role.mention}.\\n\\n"
+                "Отличные новости! Твоя заявка успешно прошла проверку.\n"
+                f"Тебе выдана роль {target_role.mention}.\n\n"
                 "Спасибо, что смотришь и поддерживаешь наше сообщество! 💜"
             )
             staff_text = f"✅ Заявка одобрена. Участнику выдана роль {target_role.mention}."
@@ -1319,7 +1319,7 @@ class RoleRequestReviewView(discord.ui.View):
             decision_label = "ОТКЛОНЕНА"
             decision_color = discord.Color.from_rgb(231, 76, 60)
             dm_description = (
-                "К сожалению, администрация не смогла одобрить твою заявку.\\n\\n"
+                "К сожалению, администрация не смогла одобрить твою заявку.\n\n"
                 "Проверь, что на скриншоте хорошо видна подписка на нужный канал. "
                 "Если считаешь, что произошла ошибка, обратись к администрации сообщества."
             )
@@ -1340,7 +1340,7 @@ class RoleRequestReviewView(discord.ui.View):
             dm_embed.add_field(name="📌 Решение", value=decision_label, inline=True)
             dm_embed.add_field(
                 name="🛡️ Рассмотрел",
-                value=f"{i.user.mention}\\n**{discord.utils.escape_markdown(i.user.display_name)}**",
+                value=f"{i.user.mention}\n**{discord.utils.escape_markdown(i.user.display_name)}**",
                 inline=False
             )
             dm_embed.set_author(
@@ -1364,7 +1364,7 @@ class RoleRequestReviewView(discord.ui.View):
             review_embed = i.message.embeds[0]
             review_embed.add_field(
                 name=f"{'✅' if approved else '❌'} Решение администрации",
-                value=f"**{decision_label}**\\nРассмотрел: {i.user.mention}",
+                value=f"**{decision_label}**\nРассмотрел: {i.user.mention}",
                 inline=False
             )
             await i.message.edit(embed=review_embed, view=None)
@@ -1388,7 +1388,7 @@ class RoleRequestReviewView(discord.ui.View):
                 await channel.send(
                     embed=embed(
                         "🗑️ ЗАЯВКА ЗАВЕРШЕНА",
-                        f"Решение: **{decision_label}**\\nРассмотрел: {i.user.mention}\\n"
+                        f"Решение: **{decision_label}**\nРассмотрел: {i.user.mention}\n"
                         "Этот приватный канал будет автоматически удалён через 5 секунд.",
                         decision_color
                     )
@@ -1497,7 +1497,7 @@ class CreatorBot(commands.Bot):
     async def on_member_update(self,before,after):
         if before.roles!=after.roles:
             add=[r.mention for r in after.roles if r not in before.roles];rem=[r.mention for r in before.roles if r not in after.roles]
-            await log_to(after.guild,f"🎭 Изменение ролей у {after.mention}\\nДобавлены: {', '.join(add) or 'нет'}\\nСняты: {', '.join(rem) or 'нет'}")
+            await log_to(after.guild,f"🎭 Изменение ролей у {after.mention}\nДобавлены: {', '.join(add) or 'нет'}\nСняты: {', '.join(rem) or 'нет'}")
     async def on_message_delete(self,msg):
         if msg.guild and not msg.author.bot:await log_to(msg.guild,f"🗑️ Удалено сообщение {msg.author.mention} в {msg.channel.mention}: {(msg.content or '[без текста]')[:700]}")
     async def on_voice_state_update(self,member,before,after):
@@ -1543,7 +1543,7 @@ class CreatorBot(commands.Bot):
                     if not r["last_video_id"]:run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]));continue
                     if vid!=r["last_video_id"]:
                         g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
-                        if ch:await ch.send(embed=embed("🔴 НОВОЕ ВИДЕО НА YOUTUBE",f"**{title}**\\n{link}",discord.Color.red()))
+                        if ch:await ch.send(embed=embed("🔴 НОВОЕ ВИДЕО НА YOUTUBE",f"**{title}**\n{link}",discord.Color.red()))
                         run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]))
                 except Exception as e:log.warning("YouTube feed: %s",e)
     @youtube_task.before_loop
@@ -1566,7 +1566,7 @@ class CreatorBot(commands.Bot):
                         g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
                         if ch:
                             url=f"https://twitch.tv/{r['username']}"
-                            await ch.send(embed=embed("🟣 НАЧАЛАСЬ ТРАНСЛЯЦИЯ!",f"**{r['username']}** уже в эфире!\\n**Название:** {stream.get('title','Прямой эфир')}\\n**Категория:** {stream.get('game_name','Twitch')}\\n{url}",discord.Color.from_rgb(145,70,255)))
+                            await ch.send(embed=embed("🟣 НАЧАЛАСЬ ТРАНСЛЯЦИЯ!",f"**{r['username']}** уже в эфире!\n**Название:** {stream.get('title','Прямой эфир')}\n**Категория:** {stream.get('game_name','Twitch')}\n{url}",discord.Color.from_rgb(145,70,255)))
                         run("UPDATE twitch_channels SET last_stream_id=? WHERE id=?",(sid,r["id"]))
         except Exception as e:log.warning("Twitch API: %s",e)
     @twitch_task.before_loop
@@ -1581,7 +1581,7 @@ class CreatorBot(commands.Bot):
             if ch and r["message_id"]:
                 try:
                     msg=await ch.fetch_message(r["message_id"]);text=", ".join(f"<@{u}>" for u in winners) if winners else "Нет участников."
-                    await msg.edit(embed=embed("🏁 РОЗЫГРЫШ ЗАВЕРШЁН",f"Приз: **{r['prize']}**\\nПобедители: {text}",discord.Color.gold()),view=None)
+                    await msg.edit(embed=embed("🏁 РОЗЫГРЫШ ЗАВЕРШЁН",f"Приз: **{r['prize']}**\nПобедители: {text}",discord.Color.gold()),view=None)
                     if winners:await ch.send(f"🎉 Поздравляем: {text}! Приз: **{r['prize']}**.")
                 except discord.HTTPException:pass
     @giveaway_task.before_loop
@@ -1593,7 +1593,7 @@ bot=CreatorBot(command_prefix="!",intents=intents)
 
 async def panel_cmd(inter, title, view):
     if not await admin(inter):return
-    await say(inter, f"**{title}**\\nВсе действия доступны через кнопки панели.", view=view)
+    await say(inter, f"**{title}**\nВсе действия доступны через кнопки панели.", view=view)
 
 @bot.tree.command(name="roles",description="Открыть панель ролей")
 async def c_roles(i):await panel_cmd(i,"🎭 Панель ролей",RoleAdminView())
@@ -1638,7 +1638,7 @@ async def c_statistics(i):
     g=i.guild
     humans=sum(not m.bot for m in g.members);bots=sum(m.bot for m in g.members)
     voice=sum(len(c.members) for c in g.voice_channels)
-    await say(i,emb=embed("📊 СТАТИСТИКА",f"👥 Участников: **{humans}**\\n🤖 Ботов: **{bots}**\\n🎙️ В голосовых: **{voice}**\\n📁 Каналов: **{len(g.channels)}**\\n🎭 Ролей: **{len(g.roles)}**"))
+    await say(i,emb=embed("📊 СТАТИСТИКА",f"👥 Участников: **{humans}**\n🤖 Ботов: **{bots}**\n🎙️ В голосовых: **{voice}**\n📁 Каналов: **{len(g.channels)}**\n🎭 Ролей: **{len(g.roles)}**"))
 @bot.tree.command(name="settings",description="Открыть общие настройки бота")
 async def c_settings(i):await panel_cmd(i,"⚙️ Настройки бота",SettingsPanel())
 

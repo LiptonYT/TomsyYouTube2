@@ -1,4 +1,4 @@
-import os, re, json, time, random, sqlite3, logging, asyncio, io, xml.etree.ElementTree as ET
+import os, re, json, time, random, sqlite3, logging, asyncio, xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -32,8 +32,16 @@ TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "").strip()
 DB_FILE = os.getenv("DB_FILE") or os.getenv("DB_PATH") or "data/bot.sqlite3"
 os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
 
-db = sqlite3.connect(DB_FILE, check_same_thread=False)
+db = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=10)
 db.row_factory = sqlite3.Row
+# SQLite WAL keeps reads responsive while small writes are committed.
+try:
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA busy_timeout=5000")
+    db.execute("PRAGMA temp_store=MEMORY")
+except sqlite3.Error:
+    log.exception("Не удалось применить настройки SQLite")
 
 def init_db():
     db.executescript("""
@@ -81,20 +89,40 @@ def run(sql, params=()):
 
 def one(sql, params=()): return db.execute(sql, params).fetchone()
 def many(sql, params=()): return db.execute(sql, params).fetchall()
+_settings_cache = {}
+
 def setting(gid, key, default=None):
+    cache_key = (gid, key)
+    if cache_key in _settings_cache:
+        return _settings_cache[cache_key]
     row = one("SELECT value FROM settings WHERE guild_id=? AND key=?", (gid, key))
-    return row["value"] if row else default
+    if row:
+        _settings_cache[cache_key] = row["value"]
+        return row["value"]
+    return default
+
 def set_setting(gid, key, value):
+    stored = str(value) if value is not None else ""
     run("INSERT INTO settings VALUES(?,?,?) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value",
-        (gid, key, str(value) if value is not None else ""))
+        (gid, key, stored))
+    _settings_cache[(gid, key)] = stored
 def num(v, default=0):
     try: return int(v)
     except (TypeError, ValueError): return default
 def ids(v):
     return list(dict.fromkeys(int(x) for x in re.split(r"[,;\\s]+", v.strip()) if x.isdigit()))
-def embed(title, description="", color=discord.Color.blurple()):
+BRAND_PURPLE = discord.Color.from_rgb(145, 70, 255)
+BRAND_RED = discord.Color.from_rgb(255, 45, 85)
+
+def embed(title, description="", color=BRAND_PURPLE):
     e = discord.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
-    e.set_footer(text="Сообщество YouTube • Twitch")
+    active_bot = globals().get("bot")
+    avatar = active_bot.user.display_avatar.url if active_bot and active_bot.user else None
+    if avatar:
+        e.set_author(name="TOMSY YOUTUBE • CREATOR COMMUNITY", icon_url=avatar)
+    else:
+        e.set_author(name="TOMSY YOUTUBE • CREATOR COMMUNITY")
+    e.set_footer(text="TOMSY YOUTUBE  •  YOUTUBE × TWITCH")
     return e
 async def say(inter, content=None, *, emb=None, view=None):
     kw = {"ephemeral": True}
@@ -538,20 +566,31 @@ class TicketPanel(discord.ui.View):
             overwrites=overwrites,
             reason=f"Новое обращение от {i.user}"
         )
-        run(
+        ticket_record = run(
             "INSERT INTO tickets(guild_id,channel_id,user_id,status,created_at) VALUES(?,?,?,'open',?)",
             (g.id, channel.id, i.user.id, int(time.time()))
         )
-        ticket_embed = embed(
-            "🎫 НОВОЕ ОБРАЩЕНИЕ В ПОДДЕРЖКУ",
-            f"Привет, {i.user.mention}!\n\n"
-            "Опиши свою проблему одним или несколькими сообщениями. "
-            "Сотрудники поддержки скоро ответят.\n\n"
-            "**Когда вопрос будет решён:** нажми **«Помогли»**.\n"
-            "Если хочешь завершить обращение самостоятельно, нажми **«Закрыть обращение»**.\n\n"
-            "📩 После закрытия бот отправит всю переписку в личные сообщения TXT-файлом.",
-            discord.Color.from_rgb(139, 92, 246)
+        ticket_id = ticket_record.lastrowid
+        ticket_embed = discord.Embed(
+            title="🎫 ОБРАЩЕНИЕ ОТКРЫТО",
+            description=(
+                f"Привет, {i.user.mention}! Добро пожаловать в **центр поддержки TomsyYouTube**. 💜\n\n"
+                "Опиши вопрос подробно — команда поможет разобраться.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**КАК ЗАКРЫТЬ ОБРАЩЕНИЕ**\n"
+                "✅ **Помогли** — если проблема решена.\n"
+                "🔒 **Закрыть обращение** — если хочешь завершить диалог.\n\n"
+                "📩 После закрытия история переписки придёт прямо в личные сообщения Discord."
+            ),
+            color=BRAND_PURPLE,
+            timestamp=datetime.now(timezone.utc)
         )
+        if bot.user:
+            ticket_embed.set_author(name="TOMSY YOUTUBE • SUPPORT CENTER", icon_url=bot.user.display_avatar.url)
+            ticket_embed.set_thumbnail(url=bot.user.display_avatar.url)
+        ticket_embed.add_field(name="👤 АВТОР", value=i.user.mention, inline=True)
+        ticket_embed.add_field(name="🛡️ КОМАНДА", value=role.mention, inline=True)
+        ticket_embed.set_footer(text=f"TOMSY YOUTUBE • PRIVATE SUPPORT • CASE #{ticket_id}")
         await channel.send(
             content=f"{i.user.mention} {role.mention}",
             embed=ticket_embed,
@@ -639,38 +678,51 @@ def split_ticket_transcript(text, limit=3800):
     return chunks
 
 
-async def send_ticket_transcript(member, transcript, row, guild, outcome, closer):
-    """Send transcript directly in Discord DMs as paginated embeds. No files."""
+async def send_ticket_transcript(member, transcript, row, guild, outcome, closer, recipient_type="author"):
+    """Send an attractive paginated Discord DM transcript; no files are created."""
     pages = split_ticket_transcript(transcript)
+    is_staff_copy = recipient_type == "staff"
+    title = "🛡️ КОПИЯ ОБРАЩЕНИЯ ДЛЯ ПОДДЕРЖКИ" if is_staff_copy else "🎫 ИСТОРИЯ ТВОЕГО ОБРАЩЕНИЯ"
+
     intro = discord.Embed(
-        title="🎫 ИСТОРИЯ ТВОЕГО ОБРАЩЕНИЯ",
+        title=title,
         description=(
-            f"Обращение **№{row['id']}** на сервере **{guild.name}** закрыто.\n\n"
-            f"**Результат:** {outcome}\n"
-            f"**Закрыл:** {closer}\n"
-            f"**Страниц переписки:** {len(pages)}\n\n"
-            "Ниже находится история переписки с командой поддержки."
+            f"**TOMSY YOUTUBE • PRIVATE SUPPORT**\n\n"
+            f"Обращение **№{row['id']}** на сервере **{guild.name}** завершено.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"**РЕЗУЛЬТАТ**\n{outcome}\n\n"
+            f"**ЗАКРЫЛ ОБРАЩЕНИЕ**\n{closer}\n\n"
+            f"**ИСТОРИЯ**\n{len(pages)} {'страница' if len(pages) == 1 else 'страниц'} переписки\n\n"
+            "Ниже — полный диалог с командой поддержки."
         ),
-        color=discord.Color.from_rgb(139, 92, 246),
+        color=BRAND_PURPLE,
         timestamp=datetime.now(timezone.utc)
     )
-    intro.set_footer(text="TomsyYouTube • Поддержка сообщества")
+    active_bot = globals().get("bot")
+    if active_bot and active_bot.user:
+        intro.set_author(name="TOMSY YOUTUBE • SUPPORT TEAM", icon_url=active_bot.user.display_avatar.url)
+        intro.set_thumbnail(url=active_bot.user.display_avatar.url)
+    if hasattr(member, "display_avatar"):
+        intro.set_thumbnail(url=member.display_avatar.url)
+    intro.set_footer(text=f"TOMSY YOUTUBE • CASE #{row['id']} • THANK YOU")
+
     await member.send(embed=intro)
 
-    # Discord permits up to 10 embeds per message. Send up to 10 transcript pages
-    # together, then continue in additional DM messages if needed.
-    for offset in range(0, len(pages), 10):
-        batch = pages[offset:offset + 10]
-        embeds = []
-        for page_index, page_text in enumerate(batch, start=offset + 1):
-            page_embed = discord.Embed(
-                title=f"💬 ПЕРЕПИСКА • СТРАНИЦА {page_index}/{len(pages)}",
-                description=page_text,
-                color=discord.Color.from_rgb(47, 129, 247)
-            )
-            page_embed.set_footer(text=f"TomsyYouTube • Обращение №{row['id']}")
-            embeds.append(page_embed)
-        await member.send(embeds=embeds)
+    # One embed per DM message: Discord limits the total combined embed text
+    # in a single message, so batching many 3.8k pages would fail.
+    for page_index, page_text in enumerate(pages, start=1):
+        page_embed = discord.Embed(
+            title=f"💬 ДИАЛОГ • СТРАНИЦА {page_index:02d}/{len(pages):02d}",
+            description=page_text,
+            color=BRAND_PURPLE if page_index % 2 else BRAND_RED,
+            timestamp=datetime.now(timezone.utc)
+        )
+        if active_bot and active_bot.user:
+            page_embed.set_author(name="TOMSY YOUTUBE • SUPPORT ARCHIVE", icon_url=active_bot.user.display_avatar.url)
+        page_embed.set_footer(text=f"PRIVATE SUPPORT • CASE #{row['id']} • {guild.name[:60]}")
+        await member.send(embed=page_embed)
+        if page_index < len(pages):
+            await asyncio.sleep(0.35)
 
 
 async def finish_ticket(interaction, outcome):
@@ -728,7 +780,7 @@ async def finish_ticket(interaction, outcome):
     opener_dm_sent = False
     if opener is not None:
         try:
-            await send_ticket_transcript(opener, transcript, row, guild, outcome, interaction.user)
+            await send_ticket_transcript(opener, transcript, row, guild, outcome, interaction.user, 'author')
             opener_dm_sent = True
         except discord.HTTPException:
             opener_dm_sent = False
@@ -736,7 +788,7 @@ async def finish_ticket(interaction, outcome):
     staff_dm_sent = False
     if not is_opener:
         try:
-            await send_ticket_transcript(interaction.user, transcript, row, guild, outcome, interaction.user)
+            await send_ticket_transcript(interaction.user, transcript, row, guild, outcome, interaction.user, 'staff')
             staff_dm_sent = True
         except discord.HTTPException:
             staff_dm_sent = False
@@ -834,14 +886,36 @@ class TicketAdmin(discord.ui.View):
         ch = i.guild.get_channel(num(setting(i.guild.id, "ticket_panel_channel_id")))
         if not isinstance(ch, discord.TextChannel):
             return await say(i, "Сначала настрой тикеты.")
-        panel_embed = embed(
-            "🎫 ПОДДЕРЖКА TOMSY YOUTUBE",
-            "Возник вопрос или нужна помощь?\n\n"
-            "Нажми **«Создать обращение»** — бот откроет приватный канал, "
-            "где ты сможешь пообщаться с командой поддержки.\n\n"
-            "🔒 После завершения обращения история переписки придёт тебе в личные сообщения.",
-            discord.Color.from_rgb(139, 92, 246)
+        panel_embed = discord.Embed(
+            title="🎫 TOMSY YOUTUBE • ЦЕНТР ПОДДЕРЖКИ",
+            description=(
+                "### ТВОЙ ВОПРОС — НАША ЗАБОТА 💜\n"
+                "Добро пожаловать в официальную службу поддержки сообщества **TomsyYouTube**.\n\n"
+                "Нажми кнопку ниже, чтобы открыть персональное приватное обращение. "
+                "Наша команда ответит тебе прямо здесь."
+            ),
+            color=BRAND_PURPLE,
+            timestamp=datetime.now(timezone.utc)
         )
+        if bot.user:
+            panel_embed.set_author(name="OFFICIAL CREATOR COMMUNITY", icon_url=bot.user.display_avatar.url)
+            panel_embed.set_thumbnail(url=bot.user.display_avatar.url)
+        panel_embed.add_field(
+            name="💬 С ЧЕМ МОЖЕМ ПОМОЧЬ",
+            value="**YouTube** • **Twitch** • Роли • Discord • Технические вопросы",
+            inline=False
+        )
+        panel_embed.add_field(
+            name="⚡ КАК ЭТО РАБОТАЕТ",
+            value="`01` Создай обращение\n`02` Опиши вопрос\n`03` Получи ответ команды",
+            inline=True
+        )
+        panel_embed.add_field(
+            name="🔒 ПРИВАТНОСТЬ",
+            value="Обращение видишь только ты и команда поддержки. История придёт в ЛС после закрытия.",
+            inline=True
+        )
+        panel_embed.set_footer(text="TOMSY YOUTUBE • CREATOR SUPPORT • WE ARE HERE FOR YOU")
         msg = await ch.send(embed=panel_embed, view=TicketPanel())
         bot.add_view(TicketPanel(), message_id=msg.id)
         await say(i, f"✅ Панель поддержки опубликована в {ch.mention}.")
@@ -1061,12 +1135,42 @@ class PollAdmin(discord.ui.View):
 
 # ---------- Levels, achievements, shop and games ----------
 
-def level_row(gid,uid):
-    row=one("SELECT * FROM levels WHERE guild_id=? AND user_id=?",(gid,uid))
+_pending_message_counts = {}
+_level_last_xp = {}
+_level_last_seen = {}
+
+def level_row(gid, uid):
+    row = one("SELECT * FROM levels WHERE guild_id=? AND user_id=?", (gid, uid))
     if not row:
-        run("INSERT OR IGNORE INTO levels(guild_id,user_id) VALUES(?,?)",(gid,uid))
-        row=one("SELECT * FROM levels WHERE guild_id=? AND user_id=?",(gid,uid))
-    return row
+        run("INSERT OR IGNORE INTO levels(guild_id,user_id) VALUES(?,?)", (gid, uid))
+        row = one("SELECT * FROM levels WHERE guild_id=? AND user_id=?", (gid, uid))
+    if row is None:
+        return {"guild_id": gid, "user_id": uid, "xp": 0, "level": 0, "coins": 0, "messages": 0, "last_xp": 0}
+    result = dict(row)
+    result["messages"] += _pending_message_counts.get((gid, uid), 0)
+    return result
+
+def queue_message_stat(gid, uid):
+    key = (gid, uid)
+    _pending_message_counts[key] = _pending_message_counts.get(key, 0) + 1
+    _level_last_seen[key] = time.time()
+
+def flush_pending_message_counts():
+    if not _pending_message_counts:
+        return 0
+    pending = list(_pending_message_counts.items())
+    db.executemany(
+        "UPDATE levels SET messages=messages+? WHERE guild_id=? AND user_id=?",
+        [(count, gid, uid) for (gid, uid), count in pending]
+    )
+    db.commit()
+    for key, count in pending:
+        remaining = _pending_message_counts.get(key, 0) - count
+        if remaining > 0:
+            _pending_message_counts[key] = remaining
+        else:
+            _pending_message_counts.pop(key, None)
+    return len(pending)
 class LevelsPanel(discord.ui.View):
     def __init__(self): super().__init__(timeout=180)
     @discord.ui.button(label="Мой профиль",emoji="👤")
@@ -2070,19 +2174,72 @@ async def get_twitch_access_token(session):
 
 
 class CreatorBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.http_session = None
+
     async def setup_hook(self):
-        init_db(); init_extra_db()
-        for view in [TicketPanel(),TicketClose(),RoomControls(),GiveawayEntry(),ApplicationApply(),ApplicationReview(),SuggestionCreate(),SuggestionVote(),ClipSubmit(),RoleRequestPublicView(),RoleRequestReviewView()]:
+        init_db()
+        init_extra_db()
+        if self.http_session is None or self.http_session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=20,
+                limit_per_host=5,
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True
+            )
+            timeout = aiohttp.ClientTimeout(total=12, connect=5, sock_read=8)
+            self.http_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                raise_for_status=False
+            )
+        for view in [TicketPanel(), TicketClose(), RoomControls(), GiveawayEntry(),
+                     ApplicationApply(), ApplicationReview(), SuggestionCreate(),
+                     SuggestionVote(), ClipSubmit(), RoleRequestPublicView(),
+                     RoleRequestReviewView()]:
             self.add_view(view)
         for row in many("SELECT guild_id,message_id,role_ids FROM role_panels"):
-            g=self.get_guild(row["guild_id"])
+            g = self.get_guild(row["guild_id"])
             if g:
-                try:self.add_view(RoleSelectView(row["guild_id"],json.loads(row["role_ids"]),g),message_id=row["message_id"])
-                except Exception:log.exception("Не удалось восстановить панель ролей")
-        self.youtube_task.start();self.twitch_task.start();self.giveaway_task.start(); reminders_loop.start(); birthday_loop.start()
+                try:
+                    self.add_view(
+                        RoleSelectView(row["guild_id"], json.loads(row["role_ids"]), g),
+                        message_id=row["message_id"]
+                    )
+                except Exception:
+                    log.exception("Не удалось восстановить панель ролей")
+        self.youtube_task.start()
+        self.twitch_task.start()
+        self.giveaway_task.start()
+        reminders_loop.start()
+        birthday_loop.start()
+        level_stats_flush_loop.start()
         if GUILD_ID:
-            obj=discord.Object(id=GUILD_ID);self.tree.copy_global_to(guild=obj);await self.tree.sync(guild=obj)
-        else:await self.tree.sync()
+            obj = discord.Object(id=GUILD_ID)
+            self.tree.copy_global_to(guild=obj)
+            await self.tree.sync(guild=obj)
+        else:
+            await self.tree.sync()
+
+    async def close(self):
+        try:
+            flush_pending_message_counts()
+        except Exception:
+            log.exception("Не удалось сохранить накопленную статистику сообщений")
+        for loop in (
+            getattr(self, "youtube_task", None),
+            getattr(self, "twitch_task", None),
+            getattr(self, "giveaway_task", None),
+            globals().get("reminders_loop"),
+            globals().get("birthday_loop"),
+            globals().get("level_stats_flush_loop"),
+        ):
+            if loop is not None and loop.is_running():
+                loop.cancel()
+        if self.http_session is not None and not self.http_session.closed:
+            await self.http_session.close()
+        await super().close()
     async def on_ready(self):
         log.info("Запущен как %s (%s)",self.user,self.user.id)
         if not getattr(self,"_role_views_restored",False):
@@ -2125,85 +2282,172 @@ class CreatorBot(commands.Bot):
                     if text:await text.delete(reason="Временная комната пуста")
                     await before.channel.delete(reason="Временная комната пуста")
                 except discord.HTTPException:pass
-    async def on_message(self,msg):
+    async def on_message(self, msg):
         if msg.guild and not msg.author.bot:
             await handle_role_request_proof(msg)
-            r=level_row(msg.guild.id,msg.author.id);now=int(time.time());xp=r["xp"];level=r["level"];coins=r["coins"];last=r["last_xp"]
-            if now-last>=60:
-                xp+=random.randint(10,20);coins+=1
-                while xp>=100+level*50:xp-=100+level*50;level+=1
-            run("UPDATE levels SET xp=?,level=?,coins=?,messages=messages+1,last_xp=? WHERE guild_id=? AND user_id=?",
-                (xp,level,coins,now if now-last>=60 else last,msg.guild.id,msg.author.id))
+            gid, uid = msg.guild.id, msg.author.id
+            now = int(time.time())
+            key = (gid, uid)
+            queue_message_stat(gid, uid)
+
+            # Read and award XP only once per minute per member, not on every message.
+            last_xp = _level_last_xp.get(key)
+            if last_xp is None:
+                current = level_row(gid, uid)
+                last_xp = current["last_xp"]
+                _level_last_xp[key] = last_xp
+
+            if now - last_xp >= 60:
+                current = level_row(gid, uid)
+                xp = current["xp"] + random.randint(10, 20)
+                level = current["level"]
+                coins = current["coins"] + 1
+                while xp >= 100 + level * 50:
+                    xp -= 100 + level * 50
+                    level += 1
+                run(
+                    "UPDATE levels SET xp=?,level=?,coins=?,last_xp=? WHERE guild_id=? AND user_id=?",
+                    (xp, level, coins, now, gid, uid)
+                )
+                _level_last_xp[key] = now
         await self.process_commands(msg)
     @tasks.loop(seconds=180)
     async def youtube_task(self):
-        rows=many("SELECT * FROM youtube_feeds")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            for r in rows:
+        rows = many("SELECT * FROM youtube_feeds")
+        session = self.http_session
+        if not rows or session is None or session.closed:
+            return
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def check_feed(row):
+            async with semaphore:
                 try:
-                    async with session.get(r["feed_url"]) as resp:
-                        if resp.status!=200:continue
-                        root=ET.fromstring(await resp.text())
-                    ns={"a":"http://www.w3.org/2005/Atom","yt":"http://www.youtube.com/xml/schemas/2015"}
-                    entry=root.find("a:entry",ns)
-                    if entry is None:continue
-                    vid=entry.findtext("yt:videoId",default="",namespaces=ns);title=entry.findtext("a:title",default="Новое видео",namespaces=ns)
-                    link=f"https://www.youtube.com/watch?v={vid}"
-                    if not vid:continue
-                    if not r["last_video_id"]:run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]));continue
-                    if vid!=r["last_video_id"]:
-                        g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
-                        if ch:
-                            notice = discord.Embed(
-                                title="🔴 НОВОЕ ВИДЕО НА YOUTUBE",
-                                description=f"**[{discord.utils.escape_markdown(title)}]({link})**\n\nНа канале вышел новый ролик! Заглядывай смотреть 💜",
-                                color=discord.Color.red(),
-                                timestamp=datetime.now(timezone.utc)
-                            )
-                            notice.set_thumbnail(url=f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
-                            notice.set_footer(text="TomsyYouTube • Уведомления YouTube")
-                            await ch.send(embed=notice)
-                        run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?",(vid,r["id"]))
-                except Exception as e:log.warning("YouTube feed: %s",e)
+                    async with session.get(row["feed_url"]) as response:
+                        if response.status != 200:
+                            return
+                        xml_text = await response.text()
+                    root = ET.fromstring(xml_text)
+                    ns = {
+                        "a": "http://www.w3.org/2005/Atom",
+                        "yt": "http://www.youtube.com/xml/schemas/2015"
+                    }
+                    entry = root.find("a:entry", ns)
+                    if entry is None:
+                        return
+                    video_id = entry.findtext("yt:videoId", default="", namespaces=ns)
+                    title = entry.findtext("a:title", default="Новое видео", namespaces=ns)
+                    if not video_id:
+                        return
+                    if not row["last_video_id"]:
+                        run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?", (video_id, row["id"]))
+                        return
+                    if video_id == row["last_video_id"]:
+                        return
+
+                    guild = self.get_guild(row["guild_id"])
+                    channel = guild.get_channel(row["channel_id"]) if guild else None
+                    if channel:
+                        link = f"https://www.youtube.com/watch?v={video_id}"
+                        notice = discord.Embed(
+                            title="🔴 НОВОЕ ВИДЕО • YOUTUBE",
+                            description=(
+                                f"**[{discord.utils.escape_markdown(title)}]({link})**\n\n"
+                                "На канале вышел новый ролик. Смотри первым и поддержи автора! ❤️"
+                            ),
+                            color=BRAND_RED,
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        if self.user:
+                            notice.set_author(name="TOMSY YOUTUBE • NEW VIDEO", icon_url=self.user.display_avatar.url)
+                        notice.set_thumbnail(url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+                        notice.add_field(name="▶️ СМОТРЕТЬ", value=f"[Открыть ролик]({link})", inline=True)
+                        notice.set_footer(text="TOMSY YOUTUBE • YOUTUBE NOTIFICATIONS")
+                        await channel.send(embed=notice)
+                    run("UPDATE youtube_feeds SET last_video_id=? WHERE id=?", (video_id, row["id"]))
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    log.warning("YouTube feed %s: %s", row["id"], exc)
+                except Exception:
+                    log.exception("Ошибка проверки YouTube feed %s", row["id"])
+
+        await asyncio.gather(*(check_feed(row) for row in rows), return_exceptions=True)
     @youtube_task.before_loop
     async def before_youtube(self):await self.wait_until_ready()
     @tasks.loop(seconds=60)
     async def twitch_task(self):
-        rows=many("SELECT * FROM twitch_channels")
-        if not rows or not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:return
+        rows = many("SELECT * FROM twitch_channels")
+        session = self.http_session
+        if not rows or not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+            return
+        if session is None or session.closed:
+            return
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                token = await get_twitch_access_token(s)
-                if not token:return
-                headers={"Client-ID":TWITCH_CLIENT_ID,"Authorization":f"Bearer {token}"}
-                for r in rows:
-                    async with s.get("https://api.twitch.tv/helix/streams",params={"user_login":r["username"]},headers=headers) as rr:data=await rr.json()
-                    streams=data.get("data",[])
-                    if not streams:continue
-                    stream=streams[0];sid=stream.get("id")
-                    if sid and sid!=r["last_stream_id"]:
-                        g=self.get_guild(r["guild_id"]);ch=g.get_channel(r["channel_id"]) if g else None
-                        if ch:
-                            url=f"https://twitch.tv/{r['username']}"
+            token = await get_twitch_access_token(session)
+            if not token:
+                return
+            headers = {
+                "Client-ID": TWITCH_CLIENT_ID,
+                "Authorization": f"Bearer {token}"
+            }
+            semaphore = asyncio.Semaphore(5)
+
+            async def check_stream(row):
+                async with semaphore:
+                    try:
+                        async with session.get(
+                            "https://api.twitch.tv/helix/streams",
+                            params={"user_login": row["username"]},
+                            headers=headers
+                        ) as response:
+                            if response.status != 200:
+                                log.warning("Twitch API для %s вернул HTTP %s", row["username"], response.status)
+                                return
+                            payload = await response.json()
+                        streams = payload.get("data", [])
+                        if not streams:
+                            if row["last_stream_id"]:
+                                run("UPDATE twitch_channels SET last_stream_id=NULL WHERE id=?", (row["id"],))
+                            return
+
+                        stream = streams[0]
+                        stream_id = stream.get("id")
+                        if not stream_id or stream_id == row["last_stream_id"]:
+                            return
+
+                        guild = self.get_guild(row["guild_id"])
+                        channel = guild.get_channel(row["channel_id"]) if guild else None
+                        if channel:
+                            url = f"https://www.twitch.tv/{row['username']}"
                             notice = discord.Embed(
-                                title="🟣 НАЧАЛАСЬ ТРАНСЛЯЦИЯ!",
+                                title="🟣 НОВЫЙ ЭФИР • TWITCH",
                                 description=(
-                                    f"**{r['username']}** уже в эфире!\n\n"
-                                    f"**Название:** {discord.utils.escape_markdown(stream.get('title', 'Прямой эфир'))}\n"
+                                    f"**{discord.utils.escape_markdown(row['username'])}** уже в прямом эфире!\n\n"
+                                    f"**Название:** {discord.utils.escape_markdown(stream.get('title') or 'Прямой эфир')}\n"
                                     f"**Категория:** {discord.utils.escape_markdown(stream.get('game_name') or 'Twitch')}\n"
                                     f"**Зрителей:** {stream.get('viewer_count', 0)}\n\n"
-                                    f"[Смотреть трансляцию]({url})"
+                                    f"🔴 [ПЕРЕЙТИ К ТРАНСЛЯЦИИ]({url})"
                                 ),
-                                color=discord.Color.from_rgb(145,70,255),
+                                color=BRAND_PURPLE,
                                 timestamp=datetime.now(timezone.utc)
                             )
-                            thumb = stream.get("thumbnail_url", "").replace("{width}", "640").replace("{height}", "360")
-                            if thumb:
-                                notice.set_image(url=thumb)
-                            notice.set_footer(text="TomsyYouTube • Уведомления Twitch")
-                            await ch.send(embed=notice)
-                        run("UPDATE twitch_channels SET last_stream_id=? WHERE id=?",(sid,r["id"]))
-        except Exception as e:log.warning("Twitch API: %s",e)
+                            if self.user:
+                                notice.set_author(name="TOMSY YOUTUBE • LIVE NOW", icon_url=self.user.display_avatar.url)
+                            thumbnail = (stream.get("thumbnail_url") or "").replace("{width}", "640").replace("{height}", "360")
+                            if thumbnail:
+                                notice.set_image(url=thumbnail)
+                            notice.set_footer(text="TOMSY YOUTUBE • TWITCH LIVE NOTIFICATIONS")
+                            await channel.send(embed=notice)
+                        run("UPDATE twitch_channels SET last_stream_id=? WHERE id=?", (stream_id, row["id"]))
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        log.warning("Twitch stream %s: %s", row["username"], exc)
+                    except Exception:
+                        log.exception("Ошибка проверки Twitch stream %s", row["username"])
+
+            await asyncio.gather(*(check_stream(row) for row in rows), return_exceptions=True)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Twitch API: %s", exc)
+        except Exception:
+            log.exception("Ошибка Twitch notifier")
     @twitch_task.before_loop
     async def before_twitch(self):await self.wait_until_ready()
     @tasks.loop(seconds=30)
@@ -2487,6 +2731,22 @@ async def automod_listener(message):
         if len(q) >= limit:
             q.clear()
             await apply_spam_strike(message)
+
+@tasks.loop(seconds=15)
+async def level_stats_flush_loop():
+    try:
+        flush_pending_message_counts()
+    except sqlite3.Error:
+        log.exception("Не удалось сохранить пакет статистики сообщений")
+    now = time.time()
+    stale = [key for key, seen in _level_last_seen.items() if now - seen > 3600]
+    for key in stale:
+        _level_last_seen.pop(key, None)
+        _level_last_xp.pop(key, None)
+
+@level_stats_flush_loop.before_loop
+async def before_level_stats_flush():
+    await bot.wait_until_ready()
 
 @tasks.loop(seconds=30)
 async def reminders_loop():

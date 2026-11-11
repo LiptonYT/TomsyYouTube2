@@ -1,4 +1,4 @@
-import os, re, json, time, random, sqlite3, logging, asyncio, xml.etree.ElementTree as ET
+import os, re, json, time, random, sqlite3, logging, asyncio, io, xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -65,6 +65,15 @@ def init_db():
         review_message_id INTEGER
     );
     """)
+    # Migrate existing ticket records without deleting the current database.
+    ticket_columns = {row[1] for row in db.execute("PRAGMA table_info(tickets)").fetchall()}
+    for column, declaration in (
+        ("closed_by", "INTEGER"),
+        ("close_reason", "TEXT"),
+        ("closed_at", "INTEGER"),
+    ):
+        if column not in ticket_columns:
+            db.execute(f"ALTER TABLE tickets ADD COLUMN {column} {declaration}")
     db.commit()
 
 def run(sql, params=()):
@@ -452,54 +461,390 @@ async def make_room(member):
 
 # ---------- Tickets ----------
 
-class TicketSetup(discord.ui.Modal,title="Настройка тикетов"):
-    category_id=discord.ui.TextInput(label="ID категории")
-    staff_role=discord.ui.TextInput(label="ID роли поддержки")
-    panel_channel=discord.ui.TextInput(label="ID канала панели")
-    async def on_submit(self,i):
-        cat=i.guild.get_channel(num(self.category_id.value)); role=i.guild.get_role(num(self.staff_role.value)); ch=i.guild.get_channel(num(self.panel_channel.value))
-        if not isinstance(cat,discord.CategoryChannel) or not role or not isinstance(ch,discord.TextChannel): return await say(i,"Проверь ID категории, роли и канала.")
-        for k,v in [("ticket_category_id",cat.id),("ticket_staff_role_id",role.id),("ticket_panel_channel_id",ch.id)]: set_setting(i.guild.id,k,v)
-        await say(i,"✅ Настройки тикетов сохранены.")
+class TicketSetup(discord.ui.Modal, title="Настройка тикетов"):
+    category_id = discord.ui.TextInput(label="ID категории")
+    staff_role = discord.ui.TextInput(label="ID роли поддержки")
+    panel_channel = discord.ui.TextInput(label="ID канала панели")
+
+    async def on_submit(self, i):
+        if i.guild is None:
+            return await say(i, "⛔ Настроить тикеты можно только на сервере.")
+        cat = i.guild.get_channel(num(self.category_id.value))
+        role = i.guild.get_role(num(self.staff_role.value))
+        ch = i.guild.get_channel(num(self.panel_channel.value))
+        if not isinstance(cat, discord.CategoryChannel) or not role or not isinstance(ch, discord.TextChannel):
+            return await say(i, "❌ Проверь ID категории, роли поддержки и текстового канала.")
+        for key, value in [
+            ("ticket_category_id", cat.id),
+            ("ticket_staff_role_id", role.id),
+            ("ticket_panel_channel_id", ch.id)
+        ]:
+            set_setting(i.guild.id, key, value)
+        await say(
+            i,
+            "✅ **Настройки поддержки сохранены!**\n\n"
+            f"📂 Категория обращений: **{cat.name}**\n"
+            f"🛡️ Сотрудники поддержки: {role.mention}\n"
+            f"📢 Панель обращений: {ch.mention}"
+        )
+
+
 class TicketPanel(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Создать обращение",emoji="🎫",style=discord.ButtonStyle.success,custom_id="ticket:create")
-    async def create(self,i,b):
-        g=i.guild; old=one("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",(g.id,i.user.id))
-        if old and g.get_channel(old["channel_id"]): return await say(i,f"У тебя уже есть тикет: <#{old['channel_id']}>")
-        cat=g.get_channel(num(setting(g.id,"ticket_category_id"))); role=g.get_role(num(setting(g.id,"ticket_staff_role_id")))
-        if not isinstance(cat,discord.CategoryChannel) or not role: return await say(i,"Тикеты ещё не настроены.")
-        ow={g.default_role:discord.PermissionOverwrite(view_channel=False),i.user:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True),
-            g.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,manage_channels=True,read_message_history=True),
-            role:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
-        ch=await g.create_text_channel(f"ticket-{i.user.name}"[:95],category=cat,overwrites=ow)
-        run("INSERT INTO tickets(guild_id,channel_id,user_id,status,created_at) VALUES(?,?,?,'open',?)",(g.id,ch.id,i.user.id,int(time.time())))
-        await ch.send(content=f"{i.user.mention} {role.mention}",embed=embed("🎫 Новое обращение","Опиши проблему. Поддержка скоро ответит."),view=TicketClose())
-        await say(i,f"✅ Тикет создан: {ch.mention}"); await log_to(g,f"🎫 {i.user.mention} создал тикет {ch.mention}.")
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Создать обращение",
+        emoji="🎫",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket:create"
+    )
+    async def create(self, i, b):
+        g = i.guild
+        if g is None:
+            return await say(i, "⛔ Создать обращение можно только на сервере.")
+
+        old = one(
+            "SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",
+            (g.id, i.user.id)
+        )
+        if old and g.get_channel(old["channel_id"]):
+            return await say(i, f"У тебя уже есть открытое обращение: <#{old['channel_id']}>")
+
+        cat = g.get_channel(num(setting(g.id, "ticket_category_id")))
+        role = g.get_role(num(setting(g.id, "ticket_staff_role_id")))
+        if not isinstance(cat, discord.CategoryChannel) or not role:
+            return await say(i, "❌ Поддержка ещё не настроена. Обратись к администрации.")
+
+        overwrites = {
+            g.default_role: discord.PermissionOverwrite(view_channel=False),
+            i.user: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True,
+                attach_files=True, embed_links=True
+            ),
+            g.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_channels=True,
+                read_message_history=True, attach_files=True, embed_links=True
+            ),
+            role: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True,
+                attach_files=True, embed_links=True
+            )
+        }
+        safe_name = re.sub(r"[^a-zA-Z0-9а-яА-Я_-]", "-", i.user.name.lower()).strip("-")[:35] or str(i.user.id)
+        channel = await g.create_text_channel(
+            f"ticket-{safe_name}"[:95],
+            category=cat,
+            overwrites=overwrites,
+            reason=f"Новое обращение от {i.user}"
+        )
+        run(
+            "INSERT INTO tickets(guild_id,channel_id,user_id,status,created_at) VALUES(?,?,?,'open',?)",
+            (g.id, channel.id, i.user.id, int(time.time()))
+        )
+        ticket_embed = embed(
+            "🎫 НОВОЕ ОБРАЩЕНИЕ В ПОДДЕРЖКУ",
+            f"Привет, {i.user.mention}!\n\n"
+            "Опиши свою проблему одним или несколькими сообщениями. "
+            "Сотрудники поддержки скоро ответят.\n\n"
+            "**Когда вопрос будет решён:** нажми **«Помогли»**.\n"
+            "Если хочешь завершить обращение самостоятельно, нажми **«Закрыть обращение»**.\n\n"
+            "📩 После закрытия бот отправит всю переписку в личные сообщения TXT-файлом.",
+            discord.Color.from_rgb(139, 92, 246)
+        )
+        await channel.send(
+            content=f"{i.user.mention} {role.mention}",
+            embed=ticket_embed,
+            view=TicketClose()
+        )
+        await say(i, f"✅ Обращение создано: {channel.mention}")
+        await log_to(g, f"🎫 {i.user.mention} создал обращение {channel.mention}.")
+
+
+async def build_ticket_transcript(channel, row, closer, outcome):
+    """Build a readable transcript string for direct delivery in Discord DMs."""
+    created_at = datetime.fromtimestamp(row["created_at"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [
+        "TOMSY YOUTUBE — ИСТОРИЯ ОБРАЩЕНИЯ",
+        "=" * 48,
+        f"Сервер: {channel.guild.name}",
+        f"Канал: #{channel.name}",
+        f"Номер обращения: {row['id']}",
+        f"Автор обращения: {row['user_id']}",
+        f"Создано: {created_at}",
+        f"Результат: {outcome}",
+        f"Закрыл: {closer} ({closer.id})",
+        f"Дата закрытия: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        "=" * 48,
+        "",
+        "ПЕРЕПИСКА",
+        "-" * 48,
+    ]
+
+    async for message in channel.history(limit=None, oldest_first=True):
+        stamp = message.created_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M:%S UTC")
+        author = f"{message.author} ({message.author.id})"
+        lines.append(f"[{stamp}] {author}")
+
+        body = (message.clean_content or "").strip()
+        if body:
+            lines.append(body)
+        elif not message.attachments and not message.embeds and not message.stickers:
+            lines.append("[сообщение без текста]")
+
+        for attachment in message.attachments:
+            lines.append(f"📎 {attachment.filename}: {attachment.url}")
+
+        for embed_item in message.embeds:
+            if embed_item.title:
+                lines.append(f"[Встроенный блок: {embed_item.title}]")
+            if embed_item.description:
+                lines.append(embed_item.description[:3000])
+            if embed_item.url:
+                lines.append(f"[Ссылка] {embed_item.url}")
+
+        for sticker in message.stickers:
+            lines.append(f"[Стикер: {sticker.name}]")
+
+        lines.append("")
+
+    transcript = "\n".join(lines)
+    # Discord embeds have a 4096-character description limit. Keep the history
+    # bounded to avoid sending an excessive number of private messages.
+    max_chars = 250_000
+    if len(transcript) > max_chars:
+        marker = "\n\n[История сокращена: размер переписки превысил лимит отправки в личные сообщения.]\n"
+        transcript = transcript[:max_chars - len(marker)] + marker
+    return transcript
+
+
+def split_ticket_transcript(text, limit=3800):
+    """Split transcript into Discord-safe page chunks without cutting a line where possible."""
+    chunks = []
+    current = ""
+    for line in text.splitlines():
+        addition = line if not current else "\n" + line
+        if len(current) + len(addition) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            current = line
+        else:
+            current += addition
+    if current or not chunks:
+        chunks.append(current or "История обращения пуста.")
+    return chunks
+
+
+async def send_ticket_transcript(member, transcript, row, guild, outcome, closer):
+    """Send transcript directly in Discord DMs as paginated embeds. No files."""
+    pages = split_ticket_transcript(transcript)
+    intro = discord.Embed(
+        title="🎫 ИСТОРИЯ ТВОЕГО ОБРАЩЕНИЯ",
+        description=(
+            f"Обращение **№{row['id']}** на сервере **{guild.name}** закрыто.\n\n"
+            f"**Результат:** {outcome}\n"
+            f"**Закрыл:** {closer}\n"
+            f"**Страниц переписки:** {len(pages)}\n\n"
+            "Ниже находится история переписки с командой поддержки."
+        ),
+        color=discord.Color.from_rgb(139, 92, 246),
+        timestamp=datetime.now(timezone.utc)
+    )
+    intro.set_footer(text="TomsyYouTube • Поддержка сообщества")
+    await member.send(embed=intro)
+
+    # Discord permits up to 10 embeds per message. Send up to 10 transcript pages
+    # together, then continue in additional DM messages if needed.
+    for offset in range(0, len(pages), 10):
+        batch = pages[offset:offset + 10]
+        embeds = []
+        for page_index, page_text in enumerate(batch, start=offset + 1):
+            page_embed = discord.Embed(
+                title=f"💬 ПЕРЕПИСКА • СТРАНИЦА {page_index}/{len(pages)}",
+                description=page_text,
+                color=discord.Color.from_rgb(47, 129, 247)
+            )
+            page_embed.set_footer(text=f"TomsyYouTube • Обращение №{row['id']}")
+            embeds.append(page_embed)
+        await member.send(embeds=embeds)
+
+
+async def finish_ticket(interaction, outcome):
+    guild = interaction.guild
+    channel = interaction.channel
+    if guild is None or not isinstance(channel, discord.TextChannel):
+        return await say(interaction, "⛔ Не удалось определить сервер или канал обращения.")
+
+    row = one(
+        "SELECT * FROM tickets WHERE channel_id=? AND status='open'",
+        (channel.id,)
+    )
+    if not row:
+        return await say(interaction, "Это обращение уже закрыто или не найдено.")
+
+    support_role = guild.get_role(num(setting(guild.id, "ticket_staff_role_id")))
+    is_staff = (
+        interaction.user.guild_permissions.administrator
+        or interaction.user.guild_permissions.manage_guild
+        or (support_role is not None and support_role in interaction.user.roles)
+    )
+    is_opener = interaction.user.id == row["user_id"]
+    if not is_opener and not is_staff:
+        return await say(interaction, "⛔ Закрыть обращение может его автор или сотрудник поддержки.")
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        transcript = await build_ticket_transcript(channel, row, interaction.user, outcome)
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "⛔ Не удалось прочитать переписку. Выдай боту право **Read Message History** в категории тикетов.",
+            ephemeral=True
+        )
+    except discord.HTTPException as exc:
+        log.exception("Не удалось создать transcript тикета %s", row["id"])
+        return await interaction.followup.send(
+            f"❌ Discord не позволил получить историю обращения: {exc}",
+            ephemeral=True
+        )
+    except Exception:
+        log.exception("Ошибка создания transcript тикета %s", row["id"])
+        return await interaction.followup.send(
+            "❌ Не удалось подготовить историю обращения. Канал оставлен, сообщения не удалены.",
+            ephemeral=True
+        )
+
+    opener = guild.get_member(row["user_id"])
+    if opener is None:
+        try:
+            opener = await guild.fetch_member(row["user_id"])
+        except discord.HTTPException:
+            opener = None
+
+    opener_dm_sent = False
+    if opener is not None:
+        try:
+            await send_ticket_transcript(opener, transcript, row, guild, outcome, interaction.user)
+            opener_dm_sent = True
+        except discord.HTTPException:
+            opener_dm_sent = False
+
+    staff_dm_sent = False
+    if not is_opener:
+        try:
+            await send_ticket_transcript(interaction.user, transcript, row, guild, outcome, interaction.user)
+            staff_dm_sent = True
+        except discord.HTTPException:
+            staff_dm_sent = False
+
+    if opener is not None and not opener_dm_sent:
+        await interaction.followup.send(
+            "⚠️ Не удалось отправить историю автору обращения в личные сообщения. "
+            "Попроси его разрешить личные сообщения от участников сервера и повтори закрытие. "
+            "Канал оставлен, переписка не потеряна.",
+            ephemeral=True
+        )
+        await log_to(
+            guild,
+            f"⚠️ Не удалось отправить историю тикета №{row['id']} автору <@{row['user_id']}>. "
+            "Канал оставлен до повторного закрытия."
+        )
+        return
+
+    if opener is None and not staff_dm_sent and not is_opener:
+        await interaction.followup.send(
+            "⚠️ Автор уже покинул сервер, а отправить копию в личные сообщения не удалось. "
+            "Канал оставлен, чтобы переписка не потерялась.",
+            ephemeral=True
+        )
+        return
+
+    closed_at = int(time.time())
+    run(
+        "UPDATE tickets SET status='closed',closed_by=?,close_reason=?,closed_at=? WHERE channel_id=?",
+        (interaction.user.id, outcome, closed_at, channel.id)
+    )
+    await log_to(
+        guild,
+        f"🔒 Обращение №{row['id']} закрыто. Автор: <@{row['user_id']}>. "
+        f"Результат: **{outcome}**. Закрыл: {interaction.user.mention}. "
+        f"История отправлена в личные сообщения."
+    )
+
+    try:
+        await channel.delete(reason=f"Обращение №{row['id']} закрыто: {outcome}")
+        await interaction.followup.send(
+            f"✅ **Обращение №{row['id']} закрыто.**\n"
+            f"Результат: **{outcome}**.\n"
+            "История переписки отправлена автору в личные сообщения. Канал удалён.",
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        try:
+            if opener is not None:
+                await channel.set_permissions(opener, send_messages=False)
+            await channel.edit(name=f"closed-{channel.name}"[:95])
+        except discord.HTTPException:
+            pass
+        await interaction.followup.send(
+            "✅ История отправлена в личные сообщения, но бот не смог удалить канал. "
+            "Выдай ему право **Manage Channels**.",
+            ephemeral=True
+        )
+        await log_to(guild, f"⚠️ Не удалось удалить канал закрытого обращения №{row['id']}.")
+
+
 class TicketClose(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Закрыть обращение",emoji="🔒",style=discord.ButtonStyle.danger,custom_id="ticket:close")
-    async def close(self,i,b):
-        row=one("SELECT * FROM tickets WHERE channel_id=? AND status='open'",(i.channel.id,))
-        if not row: return await say(i,"Тикет уже закрыт.")
-        role=i.guild.get_role(num(setting(i.guild.id,"ticket_staff_role_id")))
-        staff=i.user.guild_permissions.manage_guild or (role and role in i.user.roles)
-        if i.user.id!=row["user_id"] and not staff: return await say(i,"Закрыть тикет может автор или поддержка.")
-        run("UPDATE tickets SET status='closed' WHERE channel_id=?",(i.channel.id,))
-        opener=i.guild.get_member(row["user_id"])
-        if opener: await i.channel.set_permissions(opener,send_messages=False)
-        await i.channel.edit(name=f"closed-{i.channel.name}"[:95]); await say(i,"🔒 Тикет закрыт.")
-        await log_to(i.guild,f"🔒 Тикет закрыт: {i.channel.mention}.")
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Помогли",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket:helped"
+    )
+    async def helped(self, i, b):
+        await finish_ticket(i, "Проблема решена — поддержка помогла")
+
+    @discord.ui.button(
+        label="Закрыть обращение",
+        emoji="🔒",
+        style=discord.ButtonStyle.danger,
+        custom_id="ticket:close"
+    )
+    async def close(self, i, b):
+        await finish_ticket(i, "Обращение закрыто")
+
+
 class TicketAdmin(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
-    @discord.ui.button(label="Настроить",emoji="⚙️",style=discord.ButtonStyle.primary)
-    async def setup(self,i,b): await i.response.send_modal(TicketSetup())
-    @discord.ui.button(label="Опубликовать панель",emoji="📢",style=discord.ButtonStyle.success)
-    async def publish(self,i,b):
-        ch=i.guild.get_channel(num(setting(i.guild.id,"ticket_panel_channel_id")))
-        if not isinstance(ch,discord.TextChannel): return await say(i,"Сначала настрой тикеты.")
-        msg=await ch.send(embed=embed("🎫 ПОДДЕРЖКА СООБЩЕСТВА","Нажми кнопку ниже, чтобы создать приватное обращение."),view=TicketPanel())
-        bot.add_view(TicketPanel(),message_id=msg.id); await say(i,f"✅ Панель опубликована в {ch.mention}.")
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Настроить", emoji="⚙️", style=discord.ButtonStyle.primary)
+    async def setup(self, i, b):
+        await i.response.send_modal(TicketSetup())
+
+    @discord.ui.button(label="Опубликовать панель", emoji="📢", style=discord.ButtonStyle.success)
+    async def publish(self, i, b):
+        ch = i.guild.get_channel(num(setting(i.guild.id, "ticket_panel_channel_id")))
+        if not isinstance(ch, discord.TextChannel):
+            return await say(i, "Сначала настрой тикеты.")
+        panel_embed = embed(
+            "🎫 ПОДДЕРЖКА TOMSY YOUTUBE",
+            "Возник вопрос или нужна помощь?\n\n"
+            "Нажми **«Создать обращение»** — бот откроет приватный канал, "
+            "где ты сможешь пообщаться с командой поддержки.\n\n"
+            "🔒 После завершения обращения история переписки придёт тебе в личные сообщения.",
+            discord.Color.from_rgb(139, 92, 246)
+        )
+        msg = await ch.send(embed=panel_embed, view=TicketPanel())
+        bot.add_view(TicketPanel(), message_id=msg.id)
+        await say(i, f"✅ Панель поддержки опубликована в {ch.mention}.")
 
 # ---------- Moderation ----------
 

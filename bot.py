@@ -5,9 +5,23 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from dotenv import load_dotenv
 
-load_dotenv()
+def load_env_file(path=".env"):
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ.setdefault(key, value)
+    except FileNotFoundError:
+        pass
+
+load_env_file()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("creator-bot")
 TOKEN = (os.getenv("BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN") or "").strip()
@@ -944,24 +958,112 @@ class RoleRequestChannelsModal(discord.ui.Modal, title="Каналы заяво�
         await say(i, f"✅ Каналы настроены. Панель: {panel.mention}; категория заявок: **{category.name}**; проверяющие: {reviewer.mention}.")
 
 class RoleRequestRolesModal(discord.ui.Modal, title="Роли для системы заявок"):
-    newbie_role_id = discord.ui.TextInput(label="ID роли «Новичок»")
-    viewer_role_id = discord.ui.TextInput(label="ID роли «Зритель»")
-    pending_role_id = discord.ui.TextInput(label="ID роли «На проверке» (необязательно)", required=False)
+    newbie_role_id = discord.ui.TextInput(label="ID роли «Новичок»", max_length=25)
+    viewer_role_id = discord.ui.TextInput(label="ID роли «Зритель»", max_length=25)
+    pending_role_id = discord.ui.TextInput(
+        label="ID роли «На проверке» (необязательно)",
+        required=False,
+        max_length=25
+    )
 
     async def on_submit(self, i):
-        newbie = i.guild.get_role(num(self.newbie_role_id.value))
-        viewer = i.guild.get_role(num(self.viewer_role_id.value))
-        pending_id = num(self.pending_role_id.value)
-        pending = i.guild.get_role(pending_id) if pending_id else None
-        if not newbie or not viewer:
-            return await say(i, "Не найдена роль «Новичок» или «Зритель». Проверь ID.")
-        if pending_id and not pending:
-            return await say(i, "Не найдена роль «На проверке». Проверь ID или оставь поле пустым.")
-        set_setting(i.guild.id, "role_request_newbie_role_id", newbie.id)
-        set_setting(i.guild.id, "role_request_viewer_role_id", viewer.id)
-        set_setting(i.guild.id, "role_request_pending_role_id", pending.id if pending else 0)
-        await say(i, f"✅ Роли сохранены: {newbie.mention}, {viewer.mention}" +
-                  (f", {pending.mention}." if pending else ". Роль ожидания не используется."))
+        # Acknowledge the modal immediately. This prevents Discord's generic
+        # "Something went wrong" message if role lookup or DB writes take time.
+        try:
+            await i.response.defer(ephemeral=True, thinking=True)
+
+            if i.guild is None:
+                return await i.followup.send("⛔ Эту форму можно отправлять только на сервере.", ephemeral=True)
+
+            newbie_id = num(self.newbie_role_id.value.strip())
+            viewer_id = num(self.viewer_role_id.value.strip())
+            pending_text = self.pending_role_id.value.strip()
+            pending_id = num(pending_text) if pending_text else 0
+
+            if not newbie_id or not viewer_id:
+                return await i.followup.send(
+                    "❌ Укажи ID ролей «Новичок» и «Зритель». Поле «На проверке» можно оставить пустым.",
+                    ephemeral=True
+                )
+
+            # Fetch roles from Discord instead of relying only on the local cache.
+            server_roles = await i.guild.fetch_roles()
+            roles_by_id = {role.id: role for role in server_roles}
+
+            newbie = roles_by_id.get(newbie_id)
+            viewer = roles_by_id.get(viewer_id)
+            pending = roles_by_id.get(pending_id) if pending_id else None
+
+            missing = []
+            if newbie is None:
+                missing.append(f"«Новичок» (`{newbie_id}`)")
+            if viewer is None:
+                missing.append(f"«Зритель» (`{viewer_id}`)")
+            if pending_id and pending is None:
+                missing.append(f"«На проверке» (`{pending_id}`)")
+
+            if missing:
+                return await i.followup.send(
+                    "❌ На этом сервере не найдены следующие роли:\n"
+                    + "\n".join(f"• {item}" for item in missing)
+                    + "\n\nПроверь, что ты скопировал именно ID ролей, а не ID каналов или участников.",
+                    ephemeral=True
+                )
+
+            if newbie.is_default() or viewer.is_default() or (pending and pending.is_default()):
+                return await i.followup.send(
+                    "❌ Нельзя использовать @everyone в качестве роли для заявок.",
+                    ephemeral=True
+                )
+
+            # Store all role IDs. The optional pending role is stored as 0 when unused.
+            set_setting(i.guild.id, "role_request_newbie_role_id", newbie.id)
+            set_setting(i.guild.id, "role_request_viewer_role_id", viewer.id)
+            set_setting(i.guild.id, "role_request_pending_role_id", pending.id if pending else 0)
+
+            # Inform the administrator if the bot's role hierarchy will prevent role assignment.
+            bot_member = i.guild.me
+            hierarchy_warning = ""
+            if bot_member:
+                blocked = [
+                    role.name for role in (newbie, viewer, pending)
+                    if role and role >= bot_member.top_role
+                ]
+                if blocked:
+                    hierarchy_warning = (
+                        "\n\n⚠️ **Внимание:** роль бота должна находиться выше этих ролей: "
+                        + ", ".join(f"**{name}**" for name in blocked)
+                        + ". Перемести роль бота выше них в настройках ролей сервера."
+                    )
+
+            result = (
+                "✅ **Роли успешно сохранены!**\n\n"
+                f"🆕 Новичок: {newbie.mention}\n"
+                f"👤 Зритель: {viewer.mention}\n"
+                f"⏳ На проверке: {pending.mention if pending else 'не используется'}"
+                + hierarchy_warning
+            )
+            await i.followup.send(result, ephemeral=True)
+
+        except discord.Forbidden:
+            log.exception("Нет прав Discord API при сохранении ролей заявок")
+            try:
+                await i.followup.send(
+                    "⛔ Бот не смог получить список ролей. Проверь его доступ к серверу и разрешение View Channels.",
+                    ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
+        except Exception as exc:
+            log.exception("Ошибка в RoleRequestRolesModal.on_submit")
+            try:
+                await i.followup.send(
+                    "❌ Не удалось сохранить роли из-за внутренней ошибки. "
+                    "Открой консоль Bothost и пришли последние строки лога администрации.",
+                    ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
 
 class RoleRequestAdminPanel(discord.ui.View):
     def __init__(self):

@@ -532,6 +532,11 @@ class TicketPanel(discord.ui.View):
         if g is None:
             return await say(i, "⛔ Создать обращение можно только на сервере.")
 
+        # Discord requires an interaction acknowledgement within 3 seconds.
+        # Defer immediately before database/channel operations; say() will then
+        # send the final confirmation through interaction.followup.
+        await i.response.defer(ephemeral=True, thinking=True)
+
         old = one(
             "SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",
             (g.id, i.user.id)
@@ -560,12 +565,18 @@ class TicketPanel(discord.ui.View):
             )
         }
         safe_name = re.sub(r"[^a-zA-Z0-9а-яА-Я_-]", "-", i.user.name.lower()).strip("-")[:35] or str(i.user.id)
-        channel = await g.create_text_channel(
-            f"ticket-{safe_name}"[:95],
-            category=cat,
-            overwrites=overwrites,
-            reason=f"Новое обращение от {i.user}"
-        )
+        try:
+            channel = await g.create_text_channel(
+                f"ticket-{safe_name}"[:95],
+                category=cat,
+                overwrites=overwrites,
+                reason=f"Новое обращение от {i.user}"
+            )
+        except discord.Forbidden:
+            return await say(i, "⛔ Боту не хватает прав для создания канала. Проверь Manage Channels и права категории.")
+        except discord.HTTPException:
+            log.exception("Discord не смог создать тикет для пользователя %s", i.user.id)
+            return await say(i, "❌ Discord не смог создать обращение. Попробуй ещё раз чуть позже.")
         ticket_record = run(
             "INSERT INTO tickets(guild_id,channel_id,user_id,status,created_at) VALUES(?,?,?,'open',?)",
             (g.id, channel.id, i.user.id, int(time.time()))

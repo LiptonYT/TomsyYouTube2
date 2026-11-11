@@ -322,64 +322,310 @@ async def send_welcome(ch, member, test=False):
 
 # ---------- Rules ----------
 
-class RuleAdd(discord.ui.Modal,title="Добавить правило"):
-    title_input=discord.ui.TextInput(label="Название правила",max_length=100)
-    body=discord.ui.TextInput(label="Текст правила",style=discord.TextStyle.paragraph,max_length=1800)
-    async def on_submit(self,i):
-        run("INSERT INTO rules(guild_id,title,body) VALUES(?,?,?)",(i.guild.id,self.title_input.value,self.body.value))
-        await say(i,"✅ Правило добавлено. Нажми «Опубликовать», чтобы обновить канал.")
-class RuleEdit(discord.ui.Modal,title="Изменить правило"):
-    rule_id=discord.ui.TextInput(label="Номер правила")
-    title_input=discord.ui.TextInput(label="Новое название")
-    body=discord.ui.TextInput(label="Новый текст",style=discord.TextStyle.paragraph,max_length=1800)
-    async def on_submit(self,i):
-        rid=num(self.rule_id.value,-1)
-        if not one("SELECT id FROM rules WHERE id=? AND guild_id=?",(rid,i.guild.id)): return await say(i,"Правило не найдено.")
-        run("UPDATE rules SET title=?,body=? WHERE id=? AND guild_id=?",(self.title_input.value,self.body.value,rid,i.guild.id))
-        await say(i,"✅ Правило обновлено.")
-class RuleDelete(discord.ui.Modal,title="Удалить правило"):
-    rule_id=discord.ui.TextInput(label="Номер правила")
-    async def on_submit(self,i):
-        cur=run("DELETE FROM rules WHERE id=? AND guild_id=?",(num(self.rule_id.value),i.guild.id))
-        await say(i,"🗑️ Правило удалено." if cur.rowcount else "Правило не найдено.")
-class RuleChannel(discord.ui.Modal,title="Канал публикации правил"):
-    channel_id=discord.ui.TextInput(label="ID текстового канала")
-    async def on_submit(self,i):
-        ch=i.guild.get_channel(num(self.channel_id.value))
-        if not isinstance(ch,discord.TextChannel): return await say(i,"Канал не найден.")
-        set_setting(i.guild.id,"rules_channel_id",ch.id); await say(i,f"✅ Канал правил: {ch.mention}")
-async def publish_rules(g):
-    ch=g.get_channel(num(setting(g.id,"rules_channel_id")))
-    rows=many("SELECT id,title,body FROM rules WHERE guild_id=? ORDER BY id",(g.id,))
-    if not isinstance(ch,discord.TextChannel): return None,"Сначала выбери канал правил."
-    if not rows: return None,"Список правил пуст."
-    e=embed("📜 ПРАВИЛА СЕРВЕРА","Ознакомься с правилами сообщества. Незнание правил не освобождает от ответственности.")
-    for r in rows[:25]: e.add_field(name=f"{r['id']}. {r['title']}",value=r["body"][:1024],inline=False)
-    old=num(setting(g.id,"rules_message_id"))
-    if old:
+class RuleAdd(discord.ui.Modal, title="Добавить правило"):
+    title_input = discord.ui.TextInput(label="Название правила", max_length=100)
+    body = discord.ui.TextInput(
+        label="Текст правила",
+        style=discord.TextStyle.paragraph,
+        max_length=3500,
+        placeholder="Подробно опиши правило..."
+    )
+
+    async def on_submit(self, i):
+        await i.response.defer(ephemeral=True, thinking=True)
+        run(
+            "INSERT INTO rules(guild_id,title,body) VALUES(?,?,?)",
+            (i.guild.id, self.title_input.value.strip(), self.body.value.strip())
+        )
+        msg, err = await publish_rules(i.guild)
+        if err:
+            return await i.followup.send(
+                f"✅ Правило добавлено в базу. {err} Настрой канал и нажми «Опубликовать».",
+                ephemeral=True
+            )
+        await i.followup.send(
+            f"✅ Правило добавлено и опубликовано. Всего правил: **{len(many('SELECT id FROM rules WHERE guild_id=?', (i.guild.id,)))}**.",
+            ephemeral=True
+        )
+
+
+class RuleEdit(discord.ui.Modal, title="Изменить правило"):
+    rule_id = discord.ui.TextInput(label="Номер правила")
+    title_input = discord.ui.TextInput(label="Новое название", max_length=100)
+    body = discord.ui.TextInput(
+        label="Новый текст",
+        style=discord.TextStyle.paragraph,
+        max_length=3500
+    )
+
+    async def on_submit(self, i):
+        await i.response.defer(ephemeral=True, thinking=True)
+        rid = num(self.rule_id.value, -1)
+        if not one("SELECT id FROM rules WHERE id=? AND guild_id=?", (rid, i.guild.id)):
+            return await i.followup.send("❌ Правило с таким номером не найдено.", ephemeral=True)
+        run(
+            "UPDATE rules SET title=?,body=? WHERE id=? AND guild_id=?",
+            (self.title_input.value.strip(), self.body.value.strip(), rid, i.guild.id)
+        )
+        msg, err = await publish_rules(i.guild)
+        if err:
+            return await i.followup.send(f"✅ Правило изменено. {err}", ephemeral=True)
+        await i.followup.send(f"✅ Правило **№{rid}** изменено и публикация обновлена.", ephemeral=True)
+
+
+class RuleDelete(discord.ui.Modal, title="Удалить правило"):
+    rule_id = discord.ui.TextInput(label="Номер правила")
+
+    async def on_submit(self, i):
+        await i.response.defer(ephemeral=True, thinking=True)
+        rid = num(self.rule_id.value, -1)
+        cur = run("DELETE FROM rules WHERE id=? AND guild_id=?", (rid, i.guild.id))
+        if not cur.rowcount:
+            return await i.followup.send("❌ Правило с таким номером не найдено.", ephemeral=True)
+        msg, err = await publish_rules(i.guild)
+        if err:
+            return await i.followup.send(f"🗑️ Правило №{rid} удалено из базы. {err}", ephemeral=True)
+        total = len(many("SELECT id FROM rules WHERE guild_id=?", (i.guild.id,)))
+        await i.followup.send(
+            f"🗑️ Правило **№{rid}** удалено. Опубликованный список обновлён. Осталось: **{total}**.",
+            ephemeral=True
+        )
+
+
+class RuleChannel(discord.ui.Modal, title="Канал публикации правил"):
+    channel_id = discord.ui.TextInput(label="ID текстового канала")
+
+    async def on_submit(self, i):
+        await i.response.defer(ephemeral=True, thinking=True)
+        ch = i.guild.get_channel(num(self.channel_id.value))
+        if not isinstance(ch, discord.TextChannel):
+            return await i.followup.send("❌ Текстовый канал с таким ID не найден.", ephemeral=True)
+        set_setting(i.guild.id, "rules_channel_id", ch.id)
+        msg, err = await publish_rules(i.guild)
+        if err:
+            return await i.followup.send(f"✅ Канал правил установлен: {ch.mention}. {err}", ephemeral=True)
+        await i.followup.send(f"✅ Канал правил установлен: {ch.mention}. Публикация создана или обновлена.", ephemeral=True)
+
+
+def build_rules_pages(guild):
+    """Build an unlimited sequence of Discord-safe rule pages without truncating text."""
+    rows = many(
+        "SELECT id,title,body FROM rules WHERE guild_id=? ORDER BY id",
+        (guild.id,)
+    )
+    pages = []
+    for row in rows:
+        title = str(row["title"] or "Без названия")
+        body = str(row["body"] or "")
+        # Discord embed descriptions are limited to 4096 characters. Split unusually
+        # long legacy entries into pages instead of cutting off their text.
+        chunk_size = 3650
+        chunks = [body[pos:pos + chunk_size] for pos in range(0, len(body), chunk_size)] or ["(Текст правила не указан.)"]
+        for part_index, chunk in enumerate(chunks, start=1):
+            pages.append({
+                "rule_id": row["id"],
+                "title": title,
+                "body": chunk,
+                "part": part_index,
+                "parts": len(chunks),
+            })
+
+    if not pages:
+        pages.append({
+            "rule_id": None,
+            "title": "Правила пока не добавлены",
+            "body": "Администрация ещё не опубликовала правила сообщества.",
+            "part": 1,
+            "parts": 1,
+        })
+    return pages
+
+
+def build_rules_embed(guild, page_index=0):
+    pages = build_rules_pages(guild)
+    page_index = max(0, min(page_index, len(pages) - 1))
+    item = pages[page_index]
+    if item["rule_id"] is None:
+        description = f"**{item['title']}**\n\n{item['body']}"
+    else:
+        description = f"## 📌 ПРАВИЛО №{item['rule_id']}\n### {discord.utils.escape_markdown(item['title'])}\n\n{item['body']}"
+        if item["parts"] > 1:
+            description += f"\n\n*Продолжение правила — часть {item['part']} из {item['parts']}.*"
+
+    e = embed(
+        "📜 ПРАВИЛА СООБЩЕСТВА TOMSY YOUTUBE",
+        description,
+        BRAND_PURPLE
+    )
+    e.add_field(
+        name="💜 НАШЕ СООБЩЕСТВО",
+        value="Уважай участников, соблюдай правила и помогай сохранять дружелюбную атмосферу.",
+        inline=False
+    )
+    e.set_footer(text=f"TOMSY YOUTUBE • СТРАНИЦА {page_index + 1} ИЗ {len(pages)} • ВСЕГО ПРАВИЛ: {len(many('SELECT id FROM rules WHERE guild_id=?', (guild.id,)))}")
+    active_bot = globals().get("bot")
+    if active_bot and active_bot.user:
+        e.set_thumbnail(url=active_bot.user.display_avatar.url)
+    return e
+
+
+class PublishedRulesView(discord.ui.View):
+    """Persistent public pagination controls for the published rules message."""
+    def __init__(self, page=0, total_pages=1):
+        super().__init__(timeout=None)
+        self.page = page
+        self.total_pages = max(1, total_pages)
+        self.previous.disabled = page <= 0
+        self.next.disabled = page >= self.total_pages - 1
+
+    @staticmethod
+    def current_page(interaction):
+        if interaction.message and interaction.message.embeds:
+            footer = interaction.message.embeds[0].footer.text or ""
+            match = re.search(r"СТРАНИЦА\s+(\d+)\s+ИЗ\s+(\d+)", footer)
+            if match:
+                return max(0, int(match.group(1)) - 1)
+        return 0
+
+    @discord.ui.button(
+        label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary,
+        custom_id="rules_public:previous"
+    )
+    async def previous(self, i, button):
+        pages = build_rules_pages(i.guild)
+        page = max(0, self.current_page(i) - 1)
+        await i.response.edit_message(
+            embed=build_rules_embed(i.guild, page),
+            view=PublishedRulesView(page, len(pages))
+        )
+
+    @discord.ui.button(
+        label="Вперёд", emoji="▶️", style=discord.ButtonStyle.primary,
+        custom_id="rules_public:next"
+    )
+    async def next(self, i, button):
+        pages = build_rules_pages(i.guild)
+        page = min(len(pages) - 1, self.current_page(i) + 1)
+        await i.response.edit_message(
+            embed=build_rules_embed(i.guild, page),
+            view=PublishedRulesView(page, len(pages))
+        )
+
+
+async def publish_rules(guild):
+    ch = guild.get_channel(num(setting(guild.id, "rules_channel_id")))
+    if not isinstance(ch, discord.TextChannel):
+        return None, "Сначала выбери канал публикации правил через панель /rules."
+
+    pages = build_rules_pages(guild)
+    public_view = PublishedRulesView(0, len(pages))
+    page_embed = build_rules_embed(guild, 0)
+    old_id = num(setting(guild.id, "rules_message_id"))
+    if old_id:
         try:
-            msg=await ch.fetch_message(old); await msg.edit(embed=e); return msg,None
-        except discord.HTTPException: pass
-    msg=await ch.send(embed=e); set_setting(g.id,"rules_message_id",msg.id); return msg,None
+            msg = await ch.fetch_message(old_id)
+            await msg.edit(embed=page_embed, view=public_view)
+            return msg, None
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            return None, "У бота нет права читать историю сообщений или редактировать публикацию в этом канале."
+        except discord.HTTPException:
+            log.exception("Не удалось обновить публикацию правил на сервере %s", guild.id)
+            return None, "Discord не смог обновить публикацию. Проверь права бота и попробуй ещё раз."
+
+    try:
+        msg = await ch.send(embed=page_embed, view=public_view)
+    except discord.Forbidden:
+        return None, "У бота нет прав отправлять сообщения и встраивать ссылки в выбранный канал."
+    except discord.HTTPException:
+        log.exception("Не удалось опубликовать правила на сервере %s", guild.id)
+        return None, "Discord не смог опубликовать правила. Проверь права бота и попробуй ещё раз."
+    set_setting(guild.id, "rules_message_id", msg.id)
+    return msg, None
+
+
+class RulesListView(discord.ui.View):
+    """Ephemeral admin list with pagination, so the list is never cut off."""
+    def __init__(self, guild_id, page=0):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.page = page
+        total = len(many("SELECT id FROM rules WHERE guild_id=?", (guild_id,)))
+        self.total_pages = max(1, (total + 7) // 8)
+        self.previous.disabled = page <= 0
+        self.next.disabled = page >= self.total_pages - 1
+
+    def make_embed(self):
+        rows = many(
+            "SELECT id,title,body FROM rules WHERE guild_id=? ORDER BY id LIMIT 8 OFFSET ?",
+            (self.guild_id, self.page * 8)
+        )
+        total = len(many("SELECT id FROM rules WHERE guild_id=?", (self.guild_id,)))
+        lines = []
+        for row in rows:
+            preview = str(row["body"] or "").replace("\n", " ").strip()
+            if len(preview) > 130:
+                preview = preview[:127] + "..."
+            lines.append(f"**№{row['id']} · {discord.utils.escape_markdown(row['title'])}**\n{preview or '*(нет текста)*'}")
+        e = embed(
+            "📋 СПИСОК ПРАВИЛ",
+            "\n\n".join(lines) if lines else "Правила пока не добавлены.",
+            BRAND_PURPLE
+        )
+        e.set_footer(text=f"TOMSY YOUTUBE • СТРАНИЦА {self.page + 1} ИЗ {self.total_pages} • ВСЕГО: {total}")
+        return e
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def previous(self, i, button):
+        self.page = max(0, self.page - 1)
+        self.total_pages = max(1, (len(many("SELECT id FROM rules WHERE guild_id=?", (self.guild_id,))) + 7) // 8)
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.total_pages - 1
+        await i.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Вперёд", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def next(self, i, button):
+        self.total_pages = max(1, (len(many("SELECT id FROM rules WHERE guild_id=?", (self.guild_id,))) + 7) // 8)
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.total_pages - 1
+        await i.response.edit_message(embed=self.make_embed(), view=self)
+
+
 class RulesView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=180)
-    @discord.ui.button(label="Добавить",emoji="➕",style=discord.ButtonStyle.success)
-    async def add(self,i,b): await i.response.send_modal(RuleAdd())
-    @discord.ui.button(label="Изменить",emoji="✏️",style=discord.ButtonStyle.primary)
-    async def edit(self,i,b): await i.response.send_modal(RuleEdit())
-    @discord.ui.button(label="Удалить",emoji="🗑️",style=discord.ButtonStyle.danger)
-    async def delete(self,i,b): await i.response.send_modal(RuleDelete())
-    @discord.ui.button(label="Список",emoji="📋",style=discord.ButtonStyle.secondary)
-    async def listing(self,i,b):
-        rows=many("SELECT id,title,body FROM rules WHERE guild_id=? ORDER BY id",(i.guild.id,))
-        text="\n".join(f"**{r['id']}. {r['title']}** — {r['body'][:160]}" for r in rows) or "Правил пока нет."
-        await say(i,text[:1900])
-    @discord.ui.button(label="Канал",emoji="📢",style=discord.ButtonStyle.secondary)
-    async def channel(self,i,b): await i.response.send_modal(RuleChannel())
-    @discord.ui.button(label="Опубликовать",emoji="🚀",style=discord.ButtonStyle.success)
-    async def publish(self,i,b):
-        msg,err=await publish_rules(i.guild)
-        await say(i,err or f"✅ Правила опубликованы или обновлены в {msg.channel.mention}.")
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Добавить", emoji="➕", style=discord.ButtonStyle.success)
+    async def add(self, i, b):
+        await i.response.send_modal(RuleAdd())
+
+    @discord.ui.button(label="Изменить", emoji="✏️", style=discord.ButtonStyle.primary)
+    async def edit(self, i, b):
+        await i.response.send_modal(RuleEdit())
+
+    @discord.ui.button(label="Удалить", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def delete(self, i, b):
+        await i.response.send_modal(RuleDelete())
+
+    @discord.ui.button(label="Список", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def listing(self, i, b):
+        view = RulesListView(i.guild.id, 0)
+        await i.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
+
+    @discord.ui.button(label="Канал", emoji="📢", style=discord.ButtonStyle.secondary)
+    async def channel(self, i, b):
+        await i.response.send_modal(RuleChannel())
+
+    @discord.ui.button(label="Опубликовать", emoji="🚀", style=discord.ButtonStyle.success)
+    async def publish(self, i, b):
+        await i.response.defer(ephemeral=True, thinking=True)
+        msg, err = await publish_rules(i.guild)
+        await i.followup.send(
+            err or f"✅ Правила опубликованы или обновлены в {msg.channel.mention}. Всего страниц: **{len(build_rules_pages(i.guild))}**.",
+            ephemeral=True
+        )
 
 # ---------- Temporary voice rooms ----------
 
@@ -2208,7 +2454,7 @@ class CreatorBot(commands.Bot):
         for view in [TicketPanel(), TicketClose(), RoomControls(), GiveawayEntry(),
                      ApplicationApply(), ApplicationReview(), SuggestionCreate(),
                      SuggestionVote(), ClipSubmit(), RoleRequestPublicView(),
-                     RoleRequestReviewView()]:
+                     RoleRequestReviewView(), PublishedRulesView()]:
             self.add_view(view)
         for row in many("SELECT guild_id,message_id,role_ids FROM role_panels"):
             g = self.get_guild(row["guild_id"])
